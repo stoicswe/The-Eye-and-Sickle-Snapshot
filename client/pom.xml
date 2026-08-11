@@ -1,0 +1,703 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.stoicswe.eyeandsickle</groupId>
+    <artifactId>eyeandsickle-parent</artifactId>
+    <version>${revision}</version>
+  </parent>
+
+  <artifactId>eyeandsickle-client</artifactId>
+  <name>The Eye and Sickle :: Client</name>
+  <description>
+    The cross-platform JavaFX desktop client (docs/architecture/01 §1).
+
+    Multi-window by design: one javafx.stage.Stage per tool — map, terminal, rig
+    monitor, recon — so the player's screen ends up looking like an operator's
+    desk (docs/design/05 §5). A single-window docked fallback is REQUIRED for
+    accessibility, not optional (docs/architecture/01 §1, flagged for review).
+
+    The client is a view and input layer. It is never authoritative over
+    anything a cheater would forge (Invariant I14). It may mirror server state
+    for prediction and it may re-verify provenance chains offline against DID
+    public keys (docs/architecture/04 §6.2) — but it decides nothing.
+  </description>
+
+  <properties>
+    <client.main.class>io.github.stoicswe.eyeandsickle.client.Launcher</client.main.class>
+    <javafx.app.class>io.github.stoicswe.eyeandsickle.client.EyeAndSickleClient</javafx.app.class>
+    <!--
+      What the rig monitor's ABOUT tab reports as the client version. Defaults to the POM version
+      and is overridable (-Dclient.version=0.2.0) because a release is named after its git tag
+      while the POM stays wherever it was — see .github/workflows/build.yml, which renames the
+      artefacts for exactly that reason. Reaches the code through build.properties.
+    -->
+    <client.version>${project.version}</client.version>
+    <!--
+      The Discord application id for rich presence (client/presence/RichPresence).
+
+      ⚠ DELIBERATELY EMPTY, and empty is a supported state rather than a missing step. The id is
+      public — it identifies the game to Discord and is not a credential — but it belongs to whoever
+      registered the application at https://discord.com/developers, so a fork or a contributor's
+      local build has no business carrying ours. With this blank, the Settings switch is disabled and
+      explains why, nothing opens a pipe, and every test still passes.
+
+      Fill it in here for a real build, or pass -Ddiscord.app.id=… on the command line. It reaches
+      the code through build.properties, which is the one filtered resource (see <resources> below);
+      -Deyeandsickle.discord.appId=… overrides it at run time without a rebuild.
+    -->
+    <discord.app.id>1534704782927724584</discord.app.id>
+  </properties>
+
+  <dependencies>
+    <!--
+      ⚠ THE ONLY SPRING ARTIFACT THE CLIENT MAY HAVE, and the enforcer above is shaped to keep it
+      that way. It supplies the event broker — ApplicationEventPublisher and the multicaster behind
+      it — and nothing else. See client/events/EventBus for what it is used for and
+      docs/design/15 §3 for the amendment that permitted it.
+    -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.github.stoicswe.eyeandsickle</groupId>
+      <artifactId>eyeandsickle-protocol</artifactId>
+    </dependency>
+
+    <!--
+      The single-player runtime. This is what lets the game start with no
+      internet, no account and no PostgreSQL.
+
+      It is NOT a back door around the enforcer rules below. `solo` is a plain
+      library with no Spring, no driver and no HTTP stack (its own pom enforces
+      that), and a character it creates is local-only and can never federate —
+      so nothing it produces can enter the economy I14 protects. See
+      solo/pom.xml for the full argument.
+    -->
+    <dependency>
+      <groupId>io.github.stoicswe.eyeandsickle</groupId>
+      <artifactId>eyeandsickle-engine</artifactId>
+    </dependency>
+    <!--
+      solo's TEST jar, for `save/TestSaves` — the shared in-memory SaveStore
+      fixture. One fixture rather than one per module; see solo/pom.xml.
+      ⚠ Test scope, so it is on no shipped classpath.
+    -->
+    <dependency>
+      <groupId>io.github.stoicswe.eyeandsickle</groupId>
+      <artifactId>eyeandsickle-engine</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      JavaFX platform natives resolve automatically: org.openjfx's parent pom
+      carries profiles keyed on os.name/os.arch that set ${javafx.platform} to
+      mac-aarch64 / mac / linux / linux-aarch64 / win, and each artifact pulls
+      its own classifier. No os-maven-plugin needed for local development.
+      Building for a different OS than the one you are on means pinning the
+      classifier explicitly; see the packaging note at the bottom of this file.
+    -->
+    <dependency>
+      <groupId>org.openjfx</groupId>
+      <artifactId>javafx-controls</artifactId>
+      <version>${javafx.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.openjfx</groupId>
+      <artifactId>javafx-fxml</artifactId>
+      <version>${javafx.version}</version>
+    </dependency>
+
+    <!-- Native-feeling theming across macOS / Linux / Windows so the client
+         doesn't read as a 2005 Swing app on any of them. -->
+  </dependencies>
+
+  <build>
+    <!--
+      ⚠ TWO RESOURCE ENTRIES OVER ONE DIRECTORY, AND THE SPLIT IS LOAD-BEARING. Filtering the
+      whole of src/main/resources would rewrite the two bundled TTFs and the mascot PNG byte for
+      byte — Maven's filter is a text transform and does not know it is looking at a font — and
+      would eat any `${...}` a term page happens to contain. So exactly one file is filtered, by
+      name, and everything else is copied verbatim. Losing the <excludes> below would produce a
+      build that succeeds and a client whose fonts no longer load.
+    -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>false</filtering>
+        <excludes>
+          <exclude>io/github/stoicswe/eyeandsickle/client/build.properties</exclude>
+        </excludes>
+      </resource>
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>true</filtering>
+        <includes>
+          <include>io/github/stoicswe/eyeandsickle/client/build.properties</include>
+        </includes>
+      </resource>
+    </resources>
+    <plugins>
+      <plugin>
+        <groupId>org.openjfx</groupId>
+        <artifactId>javafx-maven-plugin</artifactId>
+        <configuration>
+          <mainClass>${javafx.app.class}</mainClass>
+          <options>
+            <!--
+              JavaFX loads native graphics libraries via System::load, which JDK
+              24+ reports as a restricted-method call and which a future JDK will
+              block outright. Granting it explicitly silences the warning now and
+              stops the client from breaking on a JDK bump later.
+            -->
+            <option>--enable-native-access=javafx.graphics</option>
+            <!-- What macOS puts in the menu bar and the dock. Without it the running application is
+                 called "java", which is the runtime's name rather than the game's. Harmless on
+                 Windows and Linux, which ignore the flag. Launcher sets the matching system
+                 properties for the platforms that read those instead.
+
+                 ⚠ THE INNER QUOTES ARE LOad-BEARING AND THIS BROKE javafx:run FOR A WHILE. The
+                 plugin hands its options to commons-exec, which TOKENISES ON WHITESPACE — so the
+                 unquoted form arrived as three arguments and the second of them, `uOS`, was taken
+                 as the main class:
+
+                     Error: Could not find or load main class uOS
+
+                 A message that names neither the option nor the plugin, on the one command
+                 CLAUDE.md documents as the way to launch the client. Any option value here that
+                 contains a space needs the same treatment. -->
+            <option>-Xdock:name="EAS uOS Client"</option>
+          </options>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>${client.main.class}</mainClass>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>client-is-not-authoritative</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <bannedDependencies>
+                  <message>
+                    INVARIANT I14. The client must not depend on the server
+                    module, must never reach a database driver, and must not
+                    acquire the parts of Spring that talk to either. Server code
+                    on the client classpath is how "the client decided the
+                    outcome" bugs start. Talk to the server over REST/WebSocket
+                    using types from eyeandsickle-protocol.
+
+                    AMENDED 2026-07-29: spring-context (with core, beans and aop)
+                    is PERMITTED, for the in-process event broker and nothing
+                    else — see client/events/EventBus and docs/design/15 UI-7.
+                    An event multicaster does not make the client authoritative,
+                    which is the thing this rule protects.
+
+                    AMENDED 2026-08-03: H2, Flyway and spring-jdbc are PERMITTED,
+                    transitively through eyeandsickle-engine, because single player
+                    now keeps its character in a local database written by the
+                    SAME store a home server uses. One save system, one migration,
+                    one set of bytes.
+
+                    ⚠ RE-READ WHAT THIS RULE IS FOR BEFORE WIDENING IT AGAIN. It
+                    is not "the client must not touch a database" — the client has
+                    always hosted the rules engine in process for single player,
+                    so a driver changes nothing about who decides. It is that
+                    SERVER CODE MUST NOT REACH THE CLIENT: the federation logic,
+                    the ledger, the quorum, the authority tables. That is why
+                    eyeandsickle-server, spring-web and all of Spring Boot stay
+                    banned, and why the ban on those is the half that matters.
+
+                    ⚠ AND A LOCAL DATABASE IS NOT A TRUST BOUNDARY. A solo save is
+                    as editable in H2 as it was in JSON. What keeps a solo
+                    character harmless is the quarantine rule (docs/architecture/12
+                    §1) — it can never federate — and never the storage format.
+
+                    The absence of a &lt;dependency&gt; element is not
+                    self-defending — someone will add one. This rule is. Adding
+                    a Spring module NOT on the permitted list is the drift this
+                    amendment is shaped to keep catching.
+                  </message>
+                  <searchTransitive>true</searchTransitive>
+                  <excludes>
+                    <exclude>io.github.stoicswe.eyeandsickle:eyeandsickle-server</exclude>
+                    <!--
+                      Everything under org.springframework EXCEPT the four the
+                      event broker needs. Listed as a broad ban plus explicit
+                      includes rather than as a list of banned modules: a new
+                      Spring module published tomorrow is caught by the first
+                      form and invisible to the second.
+                    -->
+                    <exclude>org.springframework:*</exclude>
+                    <exclude>org.springframework.boot:*</exclude>
+                    <exclude>org.postgresql:*</exclude>
+                    <exclude>org.hibernate*:*</exclude>
+                  </excludes>
+                  <includes>
+                    <include>org.springframework:spring-context</include>
+                    <include>org.springframework:spring-core</include>
+                    <include>org.springframework:spring-beans</include>
+                    <include>org.springframework:spring-aop</include>
+                    <include>org.springframework:spring-expression</include>
+                    <include>org.springframework:spring-jcl</include>
+                    <!-- The save system, via eyeandsickle-engine. See the message. -->
+                    <include>org.springframework:spring-jdbc</include>
+                    <include>org.springframework:spring-tx</include>
+                  </includes>
+                </bannedDependencies>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+
+  <profiles>
+    <!--
+      SELF-CONTAINED RUNNABLE JARS, one per platform, all buildable from ONE machine:
+
+          for p in win mac mac-aarch64 linux linux-aarch64; do
+            mvn -Pdist -Ddist.platform=$p -pl client -am package -DskipTests
+          done
+
+      produces client/target/eyeandsickle-client-<version>-<platform>.jar, each launched with
+      `java -jar <file>`. Unlike jpackage this needs no machine of the target OS, because
+      nothing is compiled per platform — only a different set of prebuilt JavaFX natives is
+      packaged. `dist.platform` defaults to this machine's, so a plain `mvn -Pdist ... package`
+      builds the one you can test locally.
+
+      ⚠ WHY NOT ONE JAR FOR EVERYTHING — this was built, measured and rejected, so please do
+      not "simplify" it back. JavaFX puts its natives at the JAR ROOT under names that carry
+      the OS but NOT the architecture: `libglass.dylib` is the name on both Intel and Apple
+      Silicon, and `libglass.so` on both x64 and ARM Linux. Merging all five classifier jars
+      therefore has the two Mac builds overwrite each other, and the two Linux builds likewise
+      — silently, because shade sees identical paths and keeps the last one. The resulting jar
+      really did contain a single x86_64 `libglass.dylib`, and it failed on the arm64 machine
+      that built it with:
+
+          UnsatisfiedLinkError ... (have 'x86_64', need 'arm64')
+
+      Windows-x64-plus-Intel-Mac-plus-x64-Linux in one file is achievable and is what that jar
+      was. It is not worth having: it excludes every Apple Silicon Mac, which is most of them.
+
+      A true single jar is possible but needs the launcher to extract arch-scoped natives and
+      point JavaFX at them through `javafx.cachedir` (whose layout is `<dir>/<runtime version>/
+      <os.arch>/`) — internals, undocumented, and silently wrong again if they ever change.
+      Per-platform jars cost one loop and depend on nothing.
+
+      ⚠ MUST RUN FROM THE CLASSPATH, which this client already requires: `Launcher` does not
+      extend Application precisely so the JVM does not look for JavaFX on the module path before
+      main() runs. `java -jar` is a classpath launch, so the two agree rather than fight. Do NOT
+      add module-info.java to make this "cleaner"; that recreates the jlink problem below.
+
+      ⚠ DOES NOT bundle a Java runtime — the player needs JDK/JRE 25+ on PATH. That is the
+      trade against jpackage, which does bundle one but CANNOT CROSS-COMPILE: a Windows image
+      must be built on Windows. This needs one machine; that needs three.
+
+      ⚠ On JDK 24+ a classpath launch warns unless started with the
+      `enable-native-access=ALL-UNNAMED` flag (two leading dashes; XML comments cannot contain
+      them). It is a warning, not a failure. The `javafx.graphics` form of that flag is WRONG
+      here and grants nothing — see CLAUDE.md; this is the one flag that differs by launch mode.
+    -->
+    <profile>
+      <id>dist</id>
+      <properties>
+        <!-- org.openjfx's parent pom sets ${javafx.platform} from os.name/os.arch, so the
+             default is whatever this machine is and a local `mvn -Pdist` is testable. -->
+        <dist.platform>${javafx.platform}</dist.platform>
+      </properties>
+      <dependencies>
+      <dependency>
+        <groupId>org.openjfx</groupId>
+        <artifactId>javafx-base</artifactId>
+        <version>${javafx.version}</version>
+        <classifier>${dist.platform}</classifier>
+      </dependency>
+      <dependency>
+        <groupId>org.openjfx</groupId>
+        <artifactId>javafx-graphics</artifactId>
+        <version>${javafx.version}</version>
+        <classifier>${dist.platform}</classifier>
+      </dependency>
+      <dependency>
+        <groupId>org.openjfx</groupId>
+        <artifactId>javafx-controls</artifactId>
+        <version>${javafx.version}</version>
+        <classifier>${dist.platform}</classifier>
+      </dependency>
+      <dependency>
+        <groupId>org.openjfx</groupId>
+        <artifactId>javafx-fxml</artifactId>
+        <version>${javafx.version}</version>
+        <classifier>${dist.platform}</classifier>
+      </dependency>
+      </dependencies>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-shade-plugin</artifactId>
+            <executions>
+              <execution>
+                <phase>package</phase>
+                <goals><goal>shade</goal></goals>
+                <configuration>
+                  <shadedArtifactAttached>true</shadedArtifactAttached>
+                  <shadedClassifierName>${dist.platform}</shadedClassifierName>
+                  <createDependencyReducedPom>false</createDependencyReducedPom>
+                  <transformers>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                      <mainClass>io.github.stoicswe.eyeandsickle.client.Launcher</mainClass>
+                      <manifestEntries>
+                        <!-- Jackson ships multi-release jars; without this the JDK ignores their
+                             versioned classes and Jackson fails in ways that look like ours. -->
+                        <Multi-Release>true</Multi-Release>
+                      </manifestEntries>
+                    </transformer>
+                    <!-- ServiceLoader files must be CONCATENATED, not overwritten. Jackson 3
+                         discovers modules this way, and last-one-wins would drop every provider
+                         but one — surfacing as a save that will not deserialise rather than as
+                         anything resembling a packaging error. -->
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                  </transformers>
+                  <filters>
+                    <filter>
+                      <artifact>*:*</artifact>
+                      <excludes>
+                        <!-- Several copies of the same descriptor cannot coexist, and a classpath
+                             launch never reads them anyway. -->
+                        <exclude>module-info.class</exclude>
+                        <exclude>META-INF/versions/*/module-info.class</exclude>
+                        <!-- Signatures do not survive repackaging: the digests stop matching the
+                             contents and the JVM refuses the jar with a SecurityException. -->
+                        <exclude>META-INF/*.SF</exclude>
+                        <exclude>META-INF/*.DSA</exclude>
+                        <exclude>META-INF/*.RSA</exclude>
+                      </excludes>
+                    </filter>
+                  </filters>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <!--
+      SELF-CONTAINED APPLICATION FOR THE HOST PLATFORM — bundles a Java runtime, so the
+      player needs no JDK at all:
+
+          mvn -Pnative -pl client -am package -DskipTests                  # app image
+          mvn -Pnative -Djpackage.installer=true -pl client -am package    # native installer
+
+      Output lands in `client/target/jpackage/`:
+
+          macOS    EAS uOS Client.app          →  installer=true gives a .dmg
+          Windows  EAS uOS Client\             →  installer=true gives an .msi
+          Linux    EAS uOS Client/             →  installer=true gives a .deb
+
+      ⚠ WRITE `installer=true`, NOT A BARE `-Djpackage.installer`. Maven's -D is declared to
+      commons-cli as taking two arguments split on `=`, so a bare flag SWALLOWS THE NEXT
+      ARGUMENT: `-Djpackage.installer -pl client` sets the property to "-pl" and leaves Maven
+      hunting for a reactor project called "client". Measured, and the error names neither the
+      property nor the real cause.
+
+      ⚠ HOST PLATFORM ONLY, AND THAT IS JPACKAGE, NOT A CHOICE WE MADE. jpackage embeds the
+      runtime of the JDK running the build and emits a platform-native launcher binary, so it
+      cannot cross-compile: a Windows .exe launcher must be produced on Windows. Shipping all
+      five platforms therefore needs `-Pdist` (or the `client-dist` module), which needs one
+      machine but bundles no runtime. The two profiles are complements, not rivals.
+
+      Nothing here has to be told which platform it is on:
+
+        · the JavaFX natives come from the plain, classifier-less `javafx-controls`/`javafx-fxml`
+          dependencies above, whose own poms carry os.name/os.arch profiles that pull this
+          machine's classifier — the same resolution `mvn test` already relies on. `-Pdist`'s
+          explicit `${dist.platform}` classifiers are deliberately NOT used here, precisely
+          because host-platform is the whole point of this profile;
+        · the runtime is jlinked from the JDK running Maven;
+        · the installer type and the OS-specific options come from the three os-activated
+          profiles below.
+
+      ⚠ OS-SPECIFIC OPTIONS MUST LIVE IN OS-ACTIVATED PROFILES, never in one shared block.
+      jpackage REJECTS a foreign option outright rather than ignoring it — `win-menu` on a Mac
+      is `Option [win-menu] is not valid on this platform`, a hard failure — so a single
+      configuration listing winMenu + linuxShortcut + macPackageIdentifier cannot build
+      anywhere. Verified against jpackage 26.
+
+      ⚠ INPUT IS A DEDICATED DIRECTORY HOLDING EXACTLY ONE JAR. jpackage copies *everything*
+      under `input` into the app, and puts every jar it finds there on the classpath (verified:
+      the generated .cfg gets one `app.classpath=` line per jar). Pointing it at `target/` would
+      ship `classes/`, `test-classes/`, `maven-status/` and the archiver working directories
+      inside the application. The shade execution below writes one uber jar into
+      `target/jpackage-input/` and nothing else goes there.
+
+      ⚠ MUST RUN FROM THE CLASSPATH — `main-jar`, never `module`. `Launcher` does not extend
+      Application so the JVM does not look for JavaFX on the module path before main() runs; see
+      the dist profile's note and CLAUDE.md. That is also why `enable-native-access` takes the
+      ALL-UNNAMED form here and the `javafx.graphics` form in `javafx:run` — the one flag in this
+      build that differs by launch mode, and the module form silently grants nothing.
+
+      ⚠ WHY jlink ALONE STILL DOES NOT WORK, and why that does not block this. jlink can only
+      link explicit JPMS modules, and `io.github.erdtman:java-json-canonicalization` is a plain
+      Java 8 jar that can only ever be an automatic module. jpackage in NON-MODULAR mode does not
+      care: it jlinks a runtime out of the JDK's own modules and puts our classpath jar beside it.
+      The cost is image size (the default runtime is generous). Trimming it means a hand-built
+      `runtime-image`, which is a real project — full JPMS is option 2 and remains open.
+    -->
+    <profile>
+      <id>native</id>
+      <properties>
+        <!--
+          app-image is the default because it needs NO external tooling: an .msi needs WiX, a
+          .deb needs dpkg/fakeroot, an .rpm needs rpm-build. A profile whose documented command
+          fails on a clean machine is worse than no profile, so the installer is opt-in
+          (-Djpackage.installer=true) and the os profiles below choose the right type for the
+          host. Override the type directly with -Djpackage.type=PKG / EXE / RPM — a CLI -D beats
+          a profile property.
+
+          ⚠ These are the plugin's ENUM CONSTANT names, not jpackage's spelling: `app-image`
+          fails the build with "No enum constant ImageType.app-image" before jpackage ever runs.
+        -->
+        <jpackage.type>APP_IMAGE</jpackage.type>
+        <jpackage.input>${project.build.directory}/jpackage-input</jpackage.input>
+        <jpackage.dest>${project.build.directory}/jpackage</jpackage.dest>
+        <!--
+          ⚠ NOT ${revision}, and this is not laziness. jpackage validates app-version hard:
+          `0.1.0-SNAPSHOT` fails with "contains invalid component [0-SNAPSHOT]", and even a clean
+          `0.1.0` fails on macOS with "The first number in an app-version cannot be zero" because
+          it becomes CFBundleVersion. Both verified. Pass a real one at release time with
+          -Djpackage.appVersion=1.2.3; until the project's own version clears 1.0 the two cannot
+          be the same string.
+        -->
+        <jpackage.appVersion>1.0.0</jpackage.appVersion>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-shade-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>shade-for-jpackage</id>
+                <phase>package</phase>
+                <goals><goal>shade</goal></goals>
+                <configuration>
+                  <!--
+                    outputFile writes the uber jar to an explicit path and leaves the module's
+                    own artifact alone — so `-Pnative` does not change what gets installed, and
+                    the input directory contains this file and nothing else.
+                  -->
+                  <outputFile>${jpackage.input}/eyeandsickle-client.jar</outputFile>
+                  <createDependencyReducedPom>false</createDependencyReducedPom>
+                  <transformers>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                      <mainClass>${client.main.class}</mainClass>
+                      <manifestEntries>
+                        <!-- Jackson ships multi-release jars; without this the JDK ignores their
+                             versioned classes and Jackson fails in ways that look like ours. -->
+                        <Multi-Release>true</Multi-Release>
+                      </manifestEntries>
+                    </transformer>
+                    <!-- ServiceLoader files must be CONCATENATED, not overwritten — see the dist
+                         profile; last-one-wins surfaces as a save that will not deserialise. -->
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                  </transformers>
+                  <filters>
+                    <filter>
+                      <artifact>*:*</artifact>
+                      <excludes>
+                        <exclude>module-info.class</exclude>
+                        <exclude>META-INF/versions/*/module-info.class</exclude>
+                        <exclude>META-INF/*.SF</exclude>
+                        <exclude>META-INF/*.DSA</exclude>
+                        <exclude>META-INF/*.RSA</exclude>
+                      </excludes>
+                    </filter>
+                  </filters>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+
+          <plugin>
+            <groupId>org.panteleyev</groupId>
+            <artifactId>jpackage-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>jpackage-host-platform</id>
+                <phase>package</phase>
+                <goals><goal>jpackage</goal></goals>
+              </execution>
+            </executions>
+            <configuration>
+              <type>${jpackage.type}</type>
+              <name>EAS uOS Client</name>
+              <appVersion>${jpackage.appVersion}</appVersion>
+              <vendor>stoicswe</vendor>
+              <copyright>The Eye and Sickle</copyright>
+              <description>The Eye and Sickle — uOS client</description>
+
+              <input>${jpackage.input}</input>
+              <mainJar>eyeandsickle-client.jar</mainJar>
+              <mainClass>${client.main.class}</mainClass>
+              <destination>${jpackage.dest}</destination>
+
+              <javaOptions>
+                <!--
+                  ⚠ Two leading dashes, and they are legal here: the "no double hyphen" rule is
+                  an XML *comment* restriction, not an element-content one. Dropping them gives
+                  the bundled JVM `enable-native-access=ALL-UNNAMED`, which it rejects as an
+                  unrecognised option — the app then fails to start with no clue why.
+                -->
+                <option>--enable-native-access=ALL-UNNAMED</option>
+              </javaOptions>
+
+              <!--
+                No icon yet: jpackage errors if the path does not exist, so an <icon> element
+                pointing at a placeholder would break the build. When there is artwork, add
+                src/main/jpackage/{macos/icon.icns,windows/icon.ico,linux/icon.png} and put the
+                <icon> element in the matching os profile below — the formats are not
+                interchangeable.
+              -->
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!--
+      Host-platform installer options. Each activates on os.family AND on -Djpackage.installer,
+      so a plain `-Pnative` build stays a bare app-image and never trips jpackage's
+      "not valid with type [app-image]" check on an installer-only option like win-menu.
+      Configuration here merges into the execution declared above.
+    -->
+    <profile>
+      <id>native-installer-mac</id>
+      <activation>
+        <os><family>mac</family></os>
+        <property><name>jpackage.installer</name></property>
+      </activation>
+      <properties>
+        <jpackage.type>DMG</jpackage.type>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.panteleyev</groupId>
+            <artifactId>jpackage-maven-plugin</artifactId>
+            <configuration>
+              <macPackageName>EAS uOS Client</macPackageName>
+              <macPackageIdentifier>io.github.stoicswe.eyeandsickle.client</macPackageIdentifier>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <id>native-installer-windows</id>
+      <activation>
+        <os><family>windows</family></os>
+        <property><name>jpackage.installer</name></property>
+      </activation>
+      <properties>
+        <jpackage.type>MSI</jpackage.type>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.panteleyev</groupId>
+            <artifactId>jpackage-maven-plugin</artifactId>
+            <configuration>
+              <winMenu>true</winMenu>
+              <winMenuGroup>The Eye and Sickle</winMenuGroup>
+              <winShortcut>true</winShortcut>
+              <winDirChooser>true</winDirChooser>
+              <!--
+                ⚠ A FIXED UUID is what makes the next .msi an UPGRADE rather than a second
+                parallel installation. Generate one once and never change it.
+              -->
+              <winUpgradeUuid>5e6f3f1e-6f2b-4a2b-9a3e-1b7f4c9d2a10</winUpgradeUuid>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <profile>
+      <id>native-installer-linux</id>
+      <activation>
+        <!--
+          ⚠ os.name, NOT family "unix" — macOS matches the unix family too, so a family match
+          here would fire on a Mac and hand jpackage linux-shortcut, which it refuses.
+          Maven's family vocabulary has no "linux" at all.
+        -->
+        <os><name>Linux</name></os>
+        <property><name>jpackage.installer</name></property>
+      </activation>
+      <properties>
+        <jpackage.type>DEB</jpackage.type>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.panteleyev</groupId>
+            <artifactId>jpackage-maven-plugin</artifactId>
+            <configuration>
+              <!-- dpkg names must be lowercase and free of spaces; the app's display name is not. -->
+              <linuxPackageName>eas-uos-client</linuxPackageName>
+              <linuxAppCategory>Game</linuxAppCategory>
+              <linuxMenuGroup>Game</linuxMenuGroup>
+              <linuxShortcut>true</linuxShortcut>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+
+  <!--
+    SELF-CONTAINED PACKAGING — where it stands, so nobody re-derives the dead end.
+
+    docs/architecture/01 §1 lists this as a [PROPOSAL] so players never have to "install a JRE
+    first". `-Pnative` above delivers it, in jpackage's NON-MODULAR mode: `type app-image`,
+    `input <dir>`, `main-jar`. Host platform only, bundled runtime, no module-info anywhere.
+
+    ⚠ `javafx:jlink` was tried first and cannot work here — a structural limit, not a
+    misconfiguration. jlink links only EXPLICIT JPMS modules; this client runs from the
+    classpath with no module-info.java, and the provenance canonicalizer
+    `io.github.erdtman:java-json-canonicalization` is a plain Java 8 jar that can only ever be
+    an AUTOMATIC module, which jlink refuses. jpackage's non-modular mode sidesteps it by
+    jlinking a runtime out of the JDK's own modules and putting our jar on the classpath beside
+    it — which is why the profile is written that way and must stay that way.
+
+    Still open, and a real dependency-graph project rather than an afternoon: full JPMS
+    (module-info.java in protocol and client, plus a modular replacement for the canonicalizer)
+    would let the runtime be trimmed to what the client actually uses. Until then the image
+    carries the JDK's default module set.
+  -->
+</project>

@@ -1,0 +1,5 @@
+#surefire_1
+#Tue Aug 11 13:28:55 EDT 2026
+basedir=/Users/stoicswe/Github/The-Eye-and-Sickle/engine
+dist.skip=true
+localRepository=/Users/stoicswe/.m2/repository

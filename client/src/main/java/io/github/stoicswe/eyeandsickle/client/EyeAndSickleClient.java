@@ -1,0 +1,1571 @@
+package io.github.stoicswe.eyeandsickle.client;
+
+import io.github.stoicswe.eyeandsickle.client.profile.CharacterSlots;
+import io.github.stoicswe.eyeandsickle.client.profile.ClientProfile;
+import io.github.stoicswe.eyeandsickle.client.session.GameSession;
+import io.github.stoicswe.eyeandsickle.client.session.LocalGameSession;
+import io.github.stoicswe.eyeandsickle.client.shell.BuiltinCommands;
+import io.github.stoicswe.eyeandsickle.client.shell.ClientCommands;
+import io.github.stoicswe.eyeandsickle.client.shell.Shell;
+import io.github.stoicswe.eyeandsickle.client.teaching.ManCommands;
+import io.github.stoicswe.eyeandsickle.client.teaching.TermDatabase;
+import io.github.stoicswe.eyeandsickle.client.theme.ThemeManager;
+import io.github.stoicswe.eyeandsickle.client.view.CalcView;
+import io.github.stoicswe.eyeandsickle.client.view.CommandPalette;
+import io.github.stoicswe.eyeandsickle.client.view.CommsView;
+import io.github.stoicswe.eyeandsickle.client.view.FileManagerView;
+import io.github.stoicswe.eyeandsickle.client.view.LogView;
+import io.github.stoicswe.eyeandsickle.client.view.MainMenuView;
+import io.github.stoicswe.eyeandsickle.client.view.ManView;
+import io.github.stoicswe.eyeandsickle.client.view.NetMapView;
+import io.github.stoicswe.eyeandsickle.client.view.NodeShellView;
+import io.github.stoicswe.eyeandsickle.client.view.NotesView;
+import io.github.stoicswe.eyeandsickle.client.view.PortScanView;
+import io.github.stoicswe.eyeandsickle.client.view.RigMonitorView;
+import io.github.stoicswe.eyeandsickle.client.view.SetupWizardView;
+import io.github.stoicswe.eyeandsickle.client.view.TerminalView;
+import io.github.stoicswe.eyeandsickle.client.view.Views;
+import io.github.stoicswe.eyeandsickle.client.window.GlobalShortcuts;
+import io.github.stoicswe.eyeandsickle.client.window.WindowRegistry;
+import io.github.stoicswe.eyeandsickle.client.window.WindowSpec;
+import io.github.stoicswe.eyeandsickle.engine.GameEngine;
+import io.github.stoicswe.eyeandsickle.engine.save.SaveStore;
+import java.time.Clock;
+import javafx.animation.Animation;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
+import javafx.application.Application;
+import javafx.scene.Parent;
+import javafx.scene.Scene;
+import javafx.stage.Stage;
+import javafx.util.Duration;
+
+/**
+ * The operator's client.
+ *
+ * <h2>It starts offline, and that is the default rather than a fallback</h2>
+ *
+ * The game opens a {@link LocalGameSession} over a {@link GameEngine}: no network, no account, no
+ * database, no second process. {@code docs/design/00-vision-and-pillars.md} makes single player the
+ * default mode, and the client honours that by being playable the moment it launches — the only I/O
+ * it performs is reading and writing two JSON files in the profile directory.
+ *
+ * <h2>One undecorated Stage, and a window manager inside it</h2>
+ *
+ * Tools used to be separate {@link Stage}s. {@code docs/design/ui-design-language.md} §0 cancelled
+ * that on 2026-07-26: native window chrome puts real macOS traffic lights and Windows title bars
+ * around the game, and "the entire aesthetic depends on the player never seeing their own operating
+ * system." What replaced it is {@link io.github.stoicswe.eyeandsickle.client.ui.DeckShell} — one
+ * {@link javafx.stage.StageStyle#UNDECORATED} Stage containing a desk the client draws itself, with
+ * drag, focus, z-order, snap-to-grid and edge tiling.
+ *
+ * <p>That is strictly more capable than either of the layouts it replaces, which is why the setting
+ * that chose between them is gone rather than repointed. Window management under time pressure is
+ * still a real barrier ({@code docs/client/07-accessibility.md}), and the answer is now the rail
+ * launcher and the switcher rather than a second layout to maintain.
+ *
+ * <h2>What this class must never become</h2>
+ *
+ * A view and input layer. It renders session-owned state and sends intent; it decides nothing a
+ * cheating client would want to forge (Invariant I14). In solo that distinction has no adversary, but
+ * the code path is the same one online play uses — which is exactly why solo must not get its own.
+ *
+ * <h2>This class has no {@code main}, deliberately</h2>
+ *
+ * Start the client through {@link Launcher}. A {@code main} here would be a run arrow in every IDE
+ * pointing at the one launch that cannot work: a main class extending {@link Application} makes the
+ * JVM look for JavaFX on the module path before {@code main} runs, and a classpath launch then dies
+ * with "JavaFX runtime components are missing" — an error that names the wrong problem entirely.
+ * {@code Launcher}'s class comment has the full explanation.
+ */
+public class EyeAndSickleClient extends Application {
+
+    /** ⚠ JUL — captured by {@code log/ClientLog} for the CLIENT LOGS tab. */
+    private static final java.util.logging.Logger LOG =
+            java.util.logging.Logger.getLogger(EyeAndSickleClient.class.getName());
+
+    private ClientProfile profile;
+    private GameSession session;
+    private ThemeManager themes;
+    private WindowRegistry registry;
+    private Shell shell;
+    private TermDatabase terms;
+    private CharacterSlots slots;
+    private Timeline heartbeat;
+    private Timeline autosave;
+    private Stage stage;
+    private io.github.stoicswe.eyeandsickle.client.ui.DeckShell deck;
+
+    /**
+     * Where the breach window is pointed, shared by the two windows that can point it.
+     *
+     * <p>One instance for the life of the client rather than one per window open: the network map
+     * arms it and the breach window reads it, and a per-window instance would mean the map aimed at
+     * a copy nobody was looking at. It holds no game state — see {@link BreachArming}.
+     */
+    /**
+     * The breach window's key.
+     *
+     * <p>⚠ ONE window, not one per target, and that is the rules' shape rather than a simplification:
+     * a rig runs one attempt at a time, so a second board would be a window with nothing to show. It
+     * goes through {@code showShell} because that is the deck's per-act window path — the same one
+     * the port scanner and the recon file use — and a constant rather than a literal because the id
+     * keys the saved desk layout and the remembered window size.
+     */
+    private static final String BREACH_WINDOW = "breach";
+
+    /**
+     * The defence round's window — {@code docs/design/19}.
+     *
+     * <p>⚠ Not a {@code WindowSpec} either, and for {@code BREACH_WINDOW}'s reason one step further:
+     * a defence is always <em>of something</em>, so a window opened from the rail with no attacker
+     * would have nothing to be about. It is opened when somebody tries to get in.
+     */
+    private static final String DEFENSE_WINDOW = "defense";
+
+    /** How long the deck keeps pulsing after a defence the player lost. */
+    private static final int BLOOD_PULSE_SECONDS = 15;
+
+    private final io.github.stoicswe.eyeandsickle.client.view.BreachArming arming =
+            new io.github.stoicswe.eyeandsickle.client.view.BreachArming();
+
+    private final io.github.stoicswe.eyeandsickle.client.view.DefenseArming defense =
+            new io.github.stoicswe.eyeandsickle.client.view.DefenseArming();
+
+    @Override
+    public void start(Stage primaryStage) {
+        // ⚠ The first line of the session's log, and it names the environment rather than just
+        // saying "started". Almost every report that reaches a maintainer needs the JVM, the OS and
+        // the architecture before anything else can be ruled in or out, and a player cannot be
+        // expected to know how to find them.
+        LOG.log(java.util.logging.Level.INFO, "{0} starting — Java {1} on {2} {3}", new Object[] {
+            Launcher.APP_NAME,
+            System.getProperty("java.version", "?"),
+            System.getProperty("os.name", "?"),
+            System.getProperty("os.arch", "?")
+        });
+        this.stage = primaryStage;
+        profile = ClientProfile.discover();
+        themes = new ThemeManager(profile);
+        registry = new WindowRegistry(profile);
+        slots = new CharacterSlots(profile);
+
+        // ⚠ Resolved BEFORE anything reads text, and used for both the interface and the manual —
+        // one language, decided once. The manual in particular is loaded here and never reloaded, so
+        // deciding after this line would leave `man` permanently English however the picker was set.
+        //
+        // ⚠ A BLANK setting means "never chosen", which is not the same as "chose English": the
+        // first is free to follow the host's language, the second must be obeyed on a German
+        // machine. An unknown tag — a language some later build removed — falls to English rather
+        // than throwing, because this is a file the player can edit.
+        io.github.stoicswe.eyeandsickle.client.i18n.Language language =
+                io.github.stoicswe.eyeandsickle.client.i18n.Language.ofTag(profile.settings().language)
+                        .orElseGet(io.github.stoicswe.eyeandsickle.client.i18n.Language::hostDefault);
+        io.github.stoicswe.eyeandsickle.client.i18n.Text.use(language);
+        terms = TermDatabase.load(language.tag());
+
+        themes.followSystemPreferences();
+
+        // ⚠ The saved answer is REPLAYED, not assumed. Rich presence is the one thing here that
+        // tells anyone outside this machine anything (docs/client/00 §7, as amended), so it has to
+        // come back on for a player who turned it on and stay dark for everyone else — and "stay
+        // dark for everyone else" is the half that has to be true without anybody remembering it,
+        // which is why it is driven from the setting rather than from a call somewhere in startSolo.
+        //
+        // ⚠ Before any character exists, so the menu and the setup assistant report as MENU rather
+        // than as whatever the last session left standing.
+        io.github.stoicswe.eyeandsickle.client.presence.RichPresence.shared()
+                .setEnabled(profile.settings().discordPresenceEnabled);
+
+        applyAudioSettings();
+
+        // ⚠ A THEME CAN CHANGE THE GEOMETRY NOW, so something has to re-shape the windows when one
+        // is picked — and this is the chokepoint rather than the pickers, deliberately. Rounding is
+        // applied by a clip and a style class, neither of which a stylesheet swap touches, and there
+        // are four places a theme changes: Settings, the login screen, the `theme` command's cycle,
+        // and reloadAppearance() when a character is loaded. Wiring the pickers means the next one
+        // added silently stops re-shaping, which is the failure DeskManager's own notes record as
+        // "a global appearance flag that reached new objects and not live ones".
+        themes.currentProperty().addListener((observable, was, now) -> {
+            applyRootRounding(stage.getScene());
+            applyDeskSettings();
+        });
+
+        // §0 and §10 criterion 1: no OS chrome visible on macOS, Windows or Linux. This has to be
+        // set before the Stage is shown — JavaFX rejects a style change on a Stage that has already
+        // been realised, and the failure is an IllegalStateException at the worst possible moment.
+        // ⚠ ALWAYS TRANSPARENT, not conditionally.
+        //
+        // Both styles are chrome-free, so §0 holds either way. The difference is that an UNDECORATED
+        // window still paints its own corner pixels — so a rounded clip cuts the deck away and the OS
+        // fills the gap, which looks like a rendering fault rather than a radius. TRANSPARENT is the
+        // only style in which a corner can actually be ABSENT.
+        //
+        // ⚠ It used to be conditional on the setting, and that was the wrong trade. `initStyle` is
+        // rejected on a realised Stage, so choosing at startup meant the main window could only
+        // change on a restart — while the desk windows changed instantly. A toggle that half works
+        // is worse than one that does not, because the player cannot tell which half is broken.
+        //
+        // The residual risk is Linux without a compositor, where a transparent Stage can render
+        // black. It is not exercised unless the player opts in: the scene's ground holder covers the
+        // window edge to edge, so with rounding OFF nothing is ever actually see-through and the
+        // window behaves exactly as it always has.
+        // ⚠ DECORATED when the player asked for their OS's own frame (§0.1). It is the one setting
+        // that contradicts §0 outright, and it is off by default so the shipped game still looks
+        // like the game.
+        //
+        // ⚠ Restart-only, unavoidably: initStyle is rejected on a realised Stage, and DECORATED and
+        // TRANSPARENT cannot both be true of one window. The rounded-corners setting could dodge
+        // this by always being TRANSPARENT; this one has no such escape, and the Settings text says
+        // so rather than leaving the player to discover it.
+        primaryStage.initStyle(
+                profile.settings().nativeWindowBorder
+                        ? javafx.stage.StageStyle.DECORATED
+                        : javafx.stage.StageStyle.TRANSPARENT);
+        // ⚠ The APPLICATION name, not the game's — and deliberately so. This deck is undecorated
+        // (§0), so the title is invisible inside the game and the only thing that ever reads it is
+        // the OS window list. On Windows it is the ONLY lever there is: the taskbar labels a window
+        // by its title and groups by the executable, and no system property changes either. A title
+        // nobody can see is worth more as the one label all three platforms agree to read.
+        // ⚠ Which name depends on whether anyone can SEE it. Undecorated, the title is invisible
+        // in-game and its only reader is the OS window list, so the application name is worth more
+        // there (it is the only lever Windows gives). With a native frame the title bar is on
+        // screen and is the game's own furniture, so it says the game's name.
+        primaryStage.setTitle(profile.settings().nativeWindowBorder ? "The Eye and Sickle" : Launcher.APP_NAME);
+        primaryStage.setOnCloseRequest(e -> shutdown());
+
+        // ⚠ Both of these must be set before the Stage is ever shown full screen, and neither can be
+        // set from the Settings panel later without a frame where the default applies.
+        //
+        // (1) JavaFX's built-in full-screen exit key is ESCAPE, and it CONSUMES the event. Escape is
+        // this client's pause menu (`deck.handleEscape`), so leaving the default in place means a
+        // player in full screen presses Escape expecting to pause and instead drops out of full
+        // screen with no menu — and the deck's own scene filter never sees the key at all.
+        // (2) The "Press ESC to exit full screen" toast is OS-drawn chrome laid over a deck whose
+        // entire premise (§0) is that there is none. An empty hint suppresses it.
+        primaryStage.setFullScreenExitKeyCombination(javafx.scene.input.KeyCombination.NO_MATCH);
+        primaryStage.setFullScreenExitHint("");
+
+        // The firmware splash, then the login screen. Once per process — see PowerOn.
+        showPowerOn(() -> showMainMenu(true));
+        applyWindowSettings();
+        primaryStage.show();
+    }
+
+    /** The narrowest the deck is supported at. See {@code ui/WindowSize.MIN_DECK_WIDTH}. */
+    private static final double UI_MIN_WIDTH = io.github.stoicswe.eyeandsickle.client.ui.WindowSize.MIN_DECK_WIDTH;
+
+    private static final double UI_MIN_HEIGHT = io.github.stoicswe.eyeandsickle.client.ui.WindowSize.MIN_DECK_HEIGHT;
+
+    /** The live scaler for whichever Scene is showing, so a settings change reaches it. */
+    private io.github.stoicswe.eyeandsickle.client.ui.UiScale uiScale;
+
+    /**
+     * Puts the window size, the UI scale and full screen from the profile onto the Stage.
+     *
+     * <h2>Order matters, twice</h2>
+     *
+     * The scale is applied <b>before</b> the size, because the Stage minimum is derived from it —
+     * setting a 1280px width while the minimum is still 1720 (860 × 200%) silently clamps the width
+     * and the player's chosen preset never takes. And full screen is applied <b>last</b>, because
+     * setting a size on a full-screen Stage is either ignored or takes effect on exit, depending on
+     * the platform; applying it last means the size is what the window returns to.
+     *
+     * <p>⚠ The size is clamped to the screen's <em>visual</em> bounds rather than its total bounds.
+     * An undecorated Stage sized past the usable area has no OS chrome to drag it back with, so a
+     * 4K preset picked on a 1080p display would put the deck's own controls off-screen and there
+     * would be no way to reach them.
+     */
+    private void applyWindowSettings() {
+        if (stage == null) {
+            return;
+        }
+        int percent = io.github.stoicswe.eyeandsickle.client.ui.UiScale.sanitise(profile.settings().uiScalePercent);
+        if (uiScale != null) {
+            uiScale.setPercent(percent);
+        }
+        double factor = percent / 100.0d;
+
+        // ⚠ The chosen resolution is the VIEWPORT's, not the window's (2026-07-27). The casing is a
+        // machine around a screen, so it sits OUTSIDE the picture: choosing 1920 × 1080 has to give
+        // the deck 1920 × 1080 and put the casing beyond it. Before this the casing was subtracted
+        // from the resolution, so a 20px casing turned a 1920-wide choice into an 1880-wide deck and
+        // the number in Settings described something the player never got.
+        io.github.stoicswe.eyeandsickle.client.ui.BezelStyle casing =
+                io.github.stoicswe.eyeandsickle.client.ui.BezelStyle.byId(profile.appearance().bezel)
+                        .orElse(io.github.stoicswe.eyeandsickle.client.ui.BezelStyle.OFF);
+        // Both sides, and scaled with everything else — the casing is drawn inside the scaled deck,
+        // so a bezel that ignored the factor would shrink as the interface grew.
+        double chrome = 2 * casing.margin() * factor;
+
+        stage.setMinWidth(UI_MIN_WIDTH * factor + chrome);
+        stage.setMinHeight(UI_MIN_HEIGHT * factor + chrome);
+
+        javafx.geometry.Rectangle2D usable = javafx.stage.Screen.getPrimary().getVisualBounds();
+        io.github.stoicswe.eyeandsickle.client.ui.WindowSize size =
+                io.github.stoicswe.eyeandsickle.client.ui.WindowSize.byId(profile.settings().windowSize)
+                        .orElse(io.github.stoicswe.eyeandsickle.client.ui.WindowSize.HD_1280);
+
+        if (!stage.isFullScreen() && !stage.isMaximized()) {
+            double width = Math.max(stage.getMinWidth(), Math.min(size.width() + chrome, usable.getWidth()));
+            double height = Math.max(stage.getMinHeight(), Math.min(size.height() + chrome, usable.getHeight()));
+            stage.setWidth(width);
+            stage.setHeight(height);
+            // Re-centred, because a window that grew from its top-left corner can end up mostly off
+            // the bottom-right of the screen — and there is no title bar to drag it back by until
+            // the top strip is on screen.
+            stage.setX(usable.getMinX() + (usable.getWidth() - width) / 2);
+            stage.setY(usable.getMinY() + (usable.getHeight() - height) / 2);
+        }
+
+        stage.setFullScreen(profile.settings().fullScreen);
+    }
+
+    /**
+     * Builds a Scene whose content is drawn through the UI scaler.
+     *
+     * <h2>⚠ Every Scene the client ever sets, without exception</h2>
+     *
+     * The menu, the boot sequence and the deck are three separate Scenes on one Stage, and the
+     * scaler lives on the Scene rather than on the Stage — so one that skipped this would snap back
+     * to 100% when the player walked through it. The boot sequence is the one that makes this
+     * visible: it sits between the menu and the deck for a few seconds, and at 150% it was the only
+     * screen that was not.
+     */
+    private Scene scaled(javafx.scene.Parent content, double width, double height) {
+        // A Parent that is not a Region cannot be given a size, and everything the client roots a
+        // Scene at is a Region. Guarding rather than casting blind, because the failure mode is a
+        // ClassCastException at a screen transition rather than at startup.
+        if (!(content instanceof javafx.scene.layout.Region region)) {
+            uiScale = null;
+            return new Scene(content, width, height);
+        }
+        uiScale = new io.github.stoicswe.eyeandsickle.client.ui.UiScale(region);
+        // ⚠ The holder paints the deck's own ground. Without it the Scene's default fill — WHITE —
+        // shows for the frame between the Stage taking a new Scene and CSS resolving on it, which is
+        // the flash a player sees when the boot log hands over to the deck. Painting it here rather
+        // than calling scene.setFill keeps the colour in the stylesheet, where §10 criterion 2
+        // requires every colour in this client to live.
+        uiScale.root().getStyleClass().add("es-scene-ground");
+        uiScale.setPercent(
+                io.github.stoicswe.eyeandsickle.client.ui.UiScale.sanitise(profile.settings().uiScalePercent));
+        Scene scene = new Scene(uiScale.root(), width, height);
+        // ⚠ A transparent FILL with an opaque ground holder on top of it. The holder covers the
+        // window edge to edge, so nothing is see-through until the clip takes a corner away — which
+        // is what makes always-TRANSPARENT safe for players who never touch the setting.
+        //
+        // Color.TRANSPARENT rather than a colour: §10 criterion 2 keeps every COLOUR in the
+        // stylesheet, and the absence of one is not a colour.
+        if (!profile.settings().nativeWindowBorder) {
+            scene.setFill(javafx.scene.paint.Color.TRANSPARENT);
+        }
+        applyRootRounding(scene);
+        return scene;
+    }
+
+    /** True once the firmware splash has played. It plays on power-on, not on every logout. */
+    private boolean poweredOn;
+
+    /**
+     * The rig's firmware coming up, before anyone has said who they are.
+     *
+     * <p>Its own Scene, like the uOS boot log — and for the same reason the menu is not built behind
+     * it: the login screen's first paint is a row of pictures being decoded, and a splash sitting on
+     * top of that would hand the player a half-drawn screen the moment it ended.
+     *
+     * <p>⚠ Guarded, and guarded here rather than inside {@link PowerOn}. {@code showMainMenu} is
+     * reached from four places — startup, "quit to menu", the pause menu and a failed connection —
+     * and only the first of those is a machine being switched on.
+     */
+    private void showPowerOn(Runnable then) {
+        if (poweredOn) {
+            then.run();
+            return;
+        }
+        poweredOn = true;
+
+        io.github.stoicswe.eyeandsickle.client.ui.PowerOn splash =
+                io.github.stoicswe.eyeandsickle.client.ui.PowerOn.play(then);
+        Scene scene = scaled(splash, 980, 760);
+        stage.setScene(scene);
+        themes.adopt(scene);
+        themes.applyAll();
+        // Focused so a keypress skips it without the player having to click the window first.
+        splash.requestFocus();
+    }
+
+    /**
+     * The menu, which is where the game starts.
+     *
+     * <p>Also where it returns to. Nothing about a session survives going back here — the previous
+     * {@link GameSession} is closed and persisted first, so "back to menu" cannot leave a half-live
+     * game ticking behind a screen the player thinks is idle.
+     */
+    private void showMainMenu() {
+        showMainMenu(false);
+    }
+
+    /**
+     * @param fadeIn true only when arriving from the firmware splash. Every other route here — quit
+     *     to menu, the pause menu, a failed connection — is a screen change the player asked for,
+     *     and fading those in would put a delay between their click and the thing they clicked for.
+     */
+    private void showMainMenu(boolean fadeIn) {
+        closeSession();
+        // Leaving a character puts the machine back into its own clothes. The login screen belongs
+        // to the machine, not to whichever operator was last sitting at it.
+        profile.useMenuAppearance();
+        themes.reloadAppearance();
+        // ⚠ The cue is asked for whether or not a track exists — a missing one is silence, by design
+        // (sound/MusicCue). Wiring the cues now is what makes dropping a correctly named .wav into
+        // the music directory the WHOLE procedure for scoring a screen; leaving them unwired would
+        // mean the first person to add a track also has to find the four places to call this from.
+        //
+        // ⚠ Safe to call on every return to the menu because it is idempotent — asking for the cue
+        // already playing is free. Without that the bed would restart from the top every time
+        // somebody quit to the menu and back.
+        io.github.stoicswe.eyeandsickle.client.sound.Audio.shared()
+                .music(io.github.stoicswe.eyeandsickle.client.sound.MusicCue.MENU);
+
+        MainMenuView.Actions actions = new MainMenuView.Actions() {
+            @Override
+            public void playSolo(int slot, String handleIfNew) {
+                startSolo(slot, handleIfNew);
+            }
+
+            @Override
+            public void setUpNewCharacter(int slot, String suggestedHandle) {
+                showSetupWizard(slot, suggestedHandle);
+            }
+
+            @Override
+            public void connectOnline(String serverAddress) {
+                EyeAndSickleClient.this.connectOnline(serverAddress);
+            }
+
+            @Override
+            public void addOnlineAccount() {
+                EyeAndSickleClient.this.showOnlineAccount();
+            }
+
+            @Override
+            public void openSettings() {
+                showMenuSettings();
+            }
+
+            @Override
+            public void quit() {
+                shutdown();
+                javafx.application.Platform.exit();
+            }
+        };
+
+        // ⚠ The CONTENT fades, not the Scene root. The root holds the ground colour, and fading
+        // that would show the Scene's TRANSPARENT fill through it (§0) — a see-through window for a
+        // fifth of a second. Fading the content over a black that never moves is also what the
+        // handover should look like.
+        javafx.scene.layout.Region content = MainMenuView.create(profile, themes, slots, actions);
+        Scene scene = scaled(content, 980, 760);
+        stage.setScene(scene);
+        themes.adopt(scene);
+        themes.applyAll();
+        if (fadeIn) {
+            io.github.stoicswe.eyeandsickle.client.ui.Fade.in(content);
+        }
+    }
+
+    /**
+     * The setup assistant, between "New character" and the character existing.
+     *
+     * <p>⚠ It writes the profile's GLOBAL settings live, so the player can see a palette rather than
+     * read its name — which means backing out has to put them back. The snapshot is taken here
+     * rather than inside the view because the restore has to outlive the view: by the time cancel
+     * runs, that node is being discarded.
+     *
+     * <p>The picture is the one value that cannot be applied as it is chosen. There is no save to
+     * hold it until {@link #startSolo} has run, so it rides out of the wizard and is applied to the
+     * session immediately afterwards.
+     */
+    private void showSetupWizard(int slot, String suggestedHandle) {
+        ClientProfile.Settings settings = profile.settings();
+        io.github.stoicswe.eyeandsickle.client.profile.SettingsSnapshot before =
+                io.github.stoicswe.eyeandsickle.client.profile.SettingsSnapshot.of(settings);
+
+        // ⚠ The palette is previewed on a look that belongs to NOBODY yet. The assistant is choosing
+        // the appearance of a character that does not exist, so its edits must not reach the menu's
+        // — that is what makes Cancel free rather than something that has to be unwound, and it is
+        // why cancelling out of pane four cannot re-theme the character the player was playing.
+        io.github.stoicswe.eyeandsickle.client.profile.VisualSettings pending = settings.appearance.copy();
+        profile.usePendingAppearance(pending);
+        themes.reloadAppearance();
+
+        SetupWizardView.Actions actions = new SetupWizardView.Actions() {
+            @Override
+            public void applyPreview() {
+                applyWindowSettings();
+            }
+
+            @Override
+            public void begin(
+                    int chosenSlot,
+                    String handle,
+                    String avatarPng,
+                    io.github.stoicswe.eyeandsickle.engine.state.WorldSettings world) {
+                // The look becomes the character's here and nowhere earlier. startSolo re-points the
+                // profile at the slot, so the pending set has to be stored against it FIRST or the
+                // character opens wearing the menu's palette instead of the one just chosen.
+                settings.characterAppearance.put(String.valueOf(chosenSlot), pending);
+                profile.save();
+                startSolo(chosenSlot, handle, world);
+                if (session != null && avatarPng != null && !avatarPng.isEmpty()) {
+                    session.setAvatar(avatarPng);
+                }
+            }
+
+            @Override
+            public void cancel() {
+                // The pending look is simply dropped — nothing wrote it anywhere. Only the
+                // machine-wide settings the assistant touched need putting back.
+                before.restoreTo(settings);
+                profile.save();
+                profile.useMenuAppearance();
+                themes.reloadAppearance();
+                // ⚠ Restoring the VALUES is only half of it: two of them need a runtime call before
+                // anything on screen changes. applyWindowSettings is what actually moves the UI
+                // scaler — UiScale.setPercent alone leaves the Stage's minimum size stale.
+                themes.setReducedMotionOverride(before.reducedMotionOverride());
+                applyWindowSettings();
+                showMainMenu();
+            }
+        };
+
+        Scene scene = scaled(SetupWizardView.create(profile, themes, slot, suggestedHandle, actions), 980, 760);
+        stage.setScene(scene);
+        themes.adopt(scene);
+        themes.applyAll();
+    }
+
+    /** Settings reached from the menu, before a game exists. */
+    private void showMenuSettings() {
+        javafx.scene.control.Dialog<Void> dialog = new javafx.scene.control.Dialog<>();
+        // Undecorated, like the main Stage. A Dialog defaults to a real OS-decorated window, which
+        // would put macOS traffic lights on screen in a client whose §0 premise is that the player
+        // never sees their own operating system.
+        dialog.initStyle(javafx.stage.StageStyle.UNDECORATED);
+        dialog.setTitle("Settings");
+        dialog.setHeaderText("Settings");
+        dialog.getDialogPane()
+                .setContent(Views.settings(profile, themes, this::applyDeskSettings, null, this::applyWindowSettings));
+        dialog.getDialogPane().getButtonTypes().add(javafx.scene.control.ButtonType.CLOSE);
+        themes.adopt(dialog.getDialogPane().getScene());
+        dialog.showAndWait();
+        profile.save();
+    }
+
+    /**
+     * Writes everything that persists: the desk arrangement, the profile, and the save.
+     *
+     * <p>One method so the four callers — autosave, the pause menu's Save, returning to the menu and
+     * quitting — cannot drift into saving different subsets of the same thing.
+     */
+    private void saveEverything() {
+        if (deck != null) {
+            deck.saveLayout();
+        }
+        profile.save();
+        if (session != null) {
+            session.persist();
+        }
+    }
+
+    /**
+     * Renames the solo operator.
+     *
+     * <p>⚠ Solo only, and the check is here rather than in the view: online, a handle comes from an
+     * AT Proto DID and the server owns it (Invariant I14). {@code GameEngine.rename} is deliberately
+     * not on the {@code GameSession} port for the same reason — a capability that must never work
+     * online is best made absent rather than guarded.
+     */
+    private void renameOperator(String handle) {
+        if (session instanceof LocalGameSession local) {
+            local.game().rename(handle);
+            session.persist();
+            profile.save();
+            // The handle is the left half of the command-strip prompt, which is built once. Without
+            // this the strip keeps the old name until the client is restarted.
+            if (deck != null) {
+                deck.applyPrompt();
+            }
+        }
+    }
+
+    /**
+     * Rounds — or unrounds — the whole application window.
+     *
+     * <h2>⚠ The SCENE ROOT is clipped, not the deck</h2>
+     *
+     * The scene root is the UI-scale holder, and the deck is inside it. Clipping the deck leaves the
+     * holder's own ground painting square corners over the top, which is indistinguishable from the
+     * setting doing nothing — the exact failure this feature has now had twice, once from CSS being
+     * clipped off and once from clipping the wrong node. Clipping the outermost thing means nothing
+     * downstream can paint the corner back in.
+     *
+     * <p>Sized from the root's own properties rather than from a listener: a size listener on the
+     * deck fires before the {@code BorderPane} has laid out its centre, which is the seventh JavaFX
+     * trap in {@code CLAUDE.md}.
+     */
+    private void applyRootRounding(Scene scene) {
+        if (scene == null || !(scene.getRoot() instanceof javafx.scene.layout.Region root)) {
+            return;
+        }
+        // ⚠ With a native frame the OS owns the outer corners, so clipping the scene root would cut
+        // the game away INSIDE a square window — a visible gap between the content and the frame.
+        // Desk windows still round; that is the deck's own furniture and stays the deck's business.
+        // ⚠ The theme can imply rounding without the player's §9.3 switch being on — one place knows
+        // that rule (ThemeId.cornersAreRounded) so this and DeckShell.applyRoundedSetting cannot
+        // disagree and leave a round outer window full of square panels.
+        if (!io.github.stoicswe.eyeandsickle.client.theme.ThemeId.cornersAreRounded(profile.appearance())
+                || profile.settings().nativeWindowBorder) {
+            root.setClip(null);
+            return;
+        }
+        javafx.scene.shape.Rectangle clip = new javafx.scene.shape.Rectangle();
+        // ⚠ arcWidth is the full arc, so it is twice the radius. Getting that backwards halves the
+        // curve and looks like the constant being wrong rather than the arithmetic.
+        clip.setArcWidth(io.github.stoicswe.eyeandsickle.client.ui.UiTokens.WINDOW_RADIUS * 2);
+        clip.setArcHeight(io.github.stoicswe.eyeandsickle.client.ui.UiTokens.WINDOW_RADIUS * 2);
+        clip.widthProperty().bind(root.widthProperty());
+        clip.heightProperty().bind(root.heightProperty());
+        root.setClip(clip);
+    }
+
+    /**
+     * Replays the saved audio settings into the engine, and wires window focus to muting.
+     *
+     * <h2>⚠ REPLAYED FROM THE SETTINGS, NEVER LEFT AT THE ENGINE'S DEFAULTS</h2>
+     *
+     * {@code Audio} is a singleton with its own sensible starting values, so a client that forgot to
+     * call this would still make a noise — at the wrong volume, on the wrong device, and ignoring a
+     * player who had turned the music off. That is the worst shape a bug like this can take, because
+     * it works well enough that nobody investigates. Same reasoning as the rich-presence line above:
+     * the saved answer is replayed rather than assumed.
+     *
+     * <h2>⚠ CALLED BEFORE ANY CHARACTER EXISTS</h2>
+     *
+     * The login screen and the setup assistant can both make noise, and both run before a save is
+     * loaded. Every setting here is machine-wide precisely so this can happen at startup rather than
+     * waiting for a character.
+     */
+    private void applyAudioSettings() {
+        var audio = io.github.stoicswe.eyeandsickle.client.sound.Audio.shared();
+        var settings = profile.settings();
+        audio.setMasterVolume(settings.soundVolumePercent);
+        audio.setBusVolume(io.github.stoicswe.eyeandsickle.client.sound.Bus.MUSIC, settings.musicVolumePercent);
+        audio.setBusVolume(io.github.stoicswe.eyeandsickle.client.sound.Bus.EFFECTS, settings.effectsVolumePercent);
+        audio.setDuckingEnabled(settings.duckMusicUnderEffects);
+        audio.setDuckDepth(settings.duckDepthPercent);
+        audio.setDevice(settings.audioDeviceName);
+        // Decoding every effect now means no first play is ever late. It is a background thread and a
+        // few tens of kilobytes; doing it lazily would put the one audible delay on the first
+        // notification of the session, which is the one most likely to be noticed.
+        audio.warmUp();
+
+        // ⚠ The listener is installed ONCE and reads the setting when it fires, rather than being
+        // added and removed as the setting changes. A listener that is attached conditionally is one
+        // that can be attached twice, and the symptom of that is a mute that needs two focus changes
+        // to lift. Reading the flag inside is free and cannot get out of step.
+        stage.focusedProperty().addListener((observable, was, focused) -> {
+            if (profile.settings().muteWhenUnfocused) {
+                io.github.stoicswe.eyeandsickle.client.sound.Audio.shared().setMuted(!focused);
+            }
+        });
+    }
+
+    /** Pushes the desk options to the live shell. A no-op from the menu, where there is no desk. */
+    private void applyDeskSettings() {
+        if (deck != null) {
+            deck.applyPlacementSetting();
+            deck.applyWindowCapSetting();
+            deck.applyScreenSettings();
+            deck.applyRoundedSetting();
+            // The command strip's prompt is built from a setting too, and a prompt still showing the
+            // old hostname after the field said it had saved reads as the setting not having worked.
+            deck.applyPrompt();
+        }
+    }
+
+    /**
+     * Reports why online play is not available, rather than hanging on a connection that cannot
+     * succeed.
+     *
+     * <p>The session shape exists and is tested; the transport does not (<b>CL-8</b>). Constructing
+     * the real {@link io.github.stoicswe.eyeandsickle.client.session.RemoteGameSession} here means
+     * the message the player sees is the same {@code EX_UNAVAILABLE} the rest of the client would
+     * produce, rather than a special case written for this screen.
+     */
+    private void connectOnline(String serverAddress) {
+        LOG.log(java.util.logging.Level.INFO, "connecting to home server {0}", serverAddress);
+        String address = serverAddress == null ? "" : serverAddress.trim();
+        if (address.isBlank()) {
+            alert(javafx.scene.control.Alert.AlertType.WARNING, "Enter a home server address first.");
+            return;
+        }
+        if (!profile.settings().knownServers.contains(address)) {
+            profile.settings().knownServers.addFirst(address);
+            profile.save();
+        }
+        try {
+            // No handle is passed: nothing has signed in, so the session reports NOT_SIGNED_IN.
+            // This used to hand over profile.settings().soloHandle — the OFFLINE character's name —
+            // which then showed as the online identity forever (architecture/10 §2).
+            var remote =
+                    new io.github.stoicswe.eyeandsickle.client.session.RemoteGameSession(java.net.URI.create(address));
+            var outcome = remote.allocateSelfMining(0);
+            remote.close();
+            alert(
+                    javafx.scene.control.Alert.AlertType.INFORMATION,
+                    outcome.message() + "\n\nThe address is remembered. Solo play needs none of this and works now.");
+        } catch (IllegalArgumentException badUri) {
+            alert(javafx.scene.control.Alert.AlertType.WARNING, "That is not a valid address: " + address);
+        }
+    }
+
+    /**
+     * The signed-in AT Protocol identity, or null. Session state, never persisted here.
+     *
+     * <p>⚠ The credentials live in the {@code TokenStore}; this is only what is on screen. Putting
+     * any part of a token in {@code ClientProfile} would break the promise its own comment makes.
+     */
+    private io.github.stoicswe.eyeandsickle.client.oauth.SignInFlow.Identity onlineIdentity;
+
+    /**
+     * Opens the "Add an online account" panel.
+     *
+     * <h2>⚠ The browser is opened through JavaFX's own {@code HostServices}</h2>
+     *
+     * Not {@code Desktop.browse} and not a subprocess. {@code HostServices.showDocument} is the
+     * toolkit's supported route, works from a jpackage image, and needs no {@code java.desktop}
+     * grant. ⚠ This is the first time the client opens a browser at all — {@code CLAUDE.md} records
+     * that Credits prints handles rather than linking them, because "opening a browser would throw
+     * the player out of a full-screen game". That reasoning holds for a gratuitous link; here the
+     * redirect <em>is</em> the protocol, and the panel warns before it happens.
+     */
+    private void showOnlineAccount() {
+        var store = io.github.stoicswe.eyeandsickle.client.oauth.TokenStores.forProfile(profile.directory());
+        var http = new io.github.stoicswe.eyeandsickle.protocol.identity.HardenedHttpClient();
+        var dids = new io.github.stoicswe.eyeandsickle.protocol.identity.DidResolver();
+        var handles = new io.github.stoicswe.eyeandsickle.protocol.identity.HandleResolver(
+                http, dids, io.github.stoicswe.eyeandsickle.protocol.identity.TxtLookup.system());
+        var discovery = new io.github.stoicswe.eyeandsickle.client.oauth.OauthDiscovery(http, handles, dids);
+
+        var flow = new io.github.stoicswe.eyeandsickle.client.oauth.SignInFlow(
+                discovery,
+                store,
+                uri -> getHostServices().showDocument(uri.toString()),
+                // ⚠ http://localhost is the atproto DEVELOPMENT client_id: the authorization server
+                // synthesises native-client metadata with loopback redirects for it, so the whole
+                // flow works with no domain and no certificate. A release build points this at the
+                // project's hosted client-metadata document and nothing else changes.
+                redirectUri -> new io.github.stoicswe.eyeandsickle.client.oauth.OauthClient(
+                        http, "http://localhost", redirectUri, java.time.Instant::now));
+
+        javafx.stage.Popup popup = new javafx.stage.Popup();
+        popup.setAutoHide(true);
+        var panel = io.github.stoicswe.eyeandsickle.client.view.OnlineAccountPanel.build(
+                new io.github.stoicswe.eyeandsickle.client.view.OnlineAccountPanel.Host() {
+                    @Override
+                    public void signIn(
+                            String handle,
+                            String server,
+                            java.util.function.Consumer<
+                                            io.github.stoicswe.eyeandsickle.client.oauth.SignInFlow.Identity>
+                                    onDone,
+                            java.util.function.Consumer<Exception> onError) {
+                        io.github.stoicswe.eyeandsickle.client.view.OnlineAccountPanel.offThread(
+                                () -> flow.signIn(handle, server), onDone, onError);
+                    }
+
+                    @Override
+                    public io.github.stoicswe.eyeandsickle.client.oauth.TokenStore store() {
+                        return store;
+                    }
+                },
+                identity -> onlineIdentity = identity);
+        popup.getContent().add(panel);
+        if (stage != null) {
+            popup.show(stage);
+        }
+    }
+
+    private void alert(javafx.scene.control.Alert.AlertType type, String message) {
+        javafx.scene.control.Alert a = new javafx.scene.control.Alert(type, message);
+        a.setHeaderText(null);
+        a.showAndWait();
+    }
+
+    /** Opens a solo character and switches the window to the game. */
+    private void startSolo(int slot, String handleIfNew) {
+        startSolo(slot, handleIfNew, null);
+    }
+
+    /**
+     * @param world the terms to generate against when this slot is EMPTY, or null for the game as it
+     *     ships. ⚠ Ignored for a slot that already holds a character — the generator runs once per
+     *     character and refuses to run twice, so settings arriving later would change nothing while
+     *     looking exactly as though they should.
+     */
+    private void startSolo(
+            int slot, String handleIfNew, io.github.stoicswe.eyeandsickle.engine.state.WorldSettings world) {
+        LOG.log(java.util.logging.Level.INFO, "opening solo character in slot {0}", slot);
+        SaveStore store = slots.store(slot);
+        String handle = handleIfNew != null && !handleIfNew.isBlank()
+                ? handleIfNew.trim()
+                : (profile.settings().soloHandle.isBlank() ? "operator" : profile.settings().soloHandle);
+
+        // ⚠ BEFORE the session, the shell, the windows and the deck. Everything below this line
+        // reads the appearance to build itself, and a deck constructed against the menu's palette
+        // and re-themed afterwards flashes the wrong look for one frame — on the screen the player
+        // is watching most closely, immediately after choosing it.
+        profile.useCharacterAppearance(slot);
+        themes.reloadAppearance();
+
+        GameEngine engine = GameEngine.open(store, handle, Clock.systemUTC(), world);
+        // ⚠ The live feed is built HERE, in the client, and only if the player supplied a key. The
+        // engine never constructs one: network I/O belongs to the client, and an engine that could
+        // fetch would also fetch on a home server — a different question with a different party's
+        // rate limits that nobody has asked.
+        //
+        // ⚠ The offline feed is always the fallback, so "runs offline out of the box" holds whether
+        // or not there is a key, a network, or a provider having a bad day.
+        // ⚠ Discovered symbols are replayed into the registry BEFORE anything reads it, so a
+        // character opened offline still knows every ticker a previous session looked up.
+        profile.settings().discoveredSymbols.forEach(io.github.stoicswe.eyeandsickle.engine.stocks.Tickers::register);
+        var offline = new io.github.stoicswe.eyeandsickle.engine.stocks.SimulatedStockFeed(
+                engine.state().characterId.hashCode());
+        String apiKey = profile.settings().stockApiKey;
+        engine.useStockFeed(
+                apiKey == null || apiKey.isBlank()
+                        ? offline
+                        : new io.github.stoicswe.eyeandsickle.client.stocks.HttpStockFeed(
+                                io.github.stoicswe.eyeandsickle.engine.stocks.StockProvider.parse(
+                                        profile.settings().stockProvider),
+                                apiKey,
+                                offline,
+                                java.time.Duration.ofSeconds(Math.max(1, profile.settings().stockRefreshSeconds)),
+                                // ⚠ A supplier, read at refresh time. What the player holds and watches
+                                // changes while the client runs; a set captured here would leave anything
+                                // bought this session on the once-a-day cadence until a restart.
+                                () -> io.github.stoicswe.eyeandsickle.engine.rules.Brokerage.tracked(engine.state())));
+        LocalGameSession local = new LocalGameSession(engine);
+        if (apiKey != null && !apiKey.isBlank()) {
+            local.useSymbolLookup(new io.github.stoicswe.eyeandsickle.client.stocks.SymbolLookup(
+                    io.github.stoicswe.eyeandsickle.engine.stocks.StockProvider.parse(profile.settings().stockProvider),
+                    apiKey));
+        }
+        // ⚠ Persisted as soon as the universe grows, not at shutdown. A player who discovers a
+        // symbol and then crashes should not have spent an API call for nothing.
+        local.onSymbolsDiscovered(() -> {
+            var found = io.github.stoicswe.eyeandsickle.engine.stocks.Tickers.discovered();
+            var kept = profile.settings().discoveredSymbols;
+            kept.putAll(found);
+            // ⚠ Bounded, trimmed from the front — a settings file is one a human should be able to
+            // open, and years of searching would otherwise turn it into a symbol table.
+            var iterator = kept.entrySet().iterator();
+            while (kept.size() > io.github.stoicswe.eyeandsickle.client.profile.ClientProfile.Settings.DISCOVERED_LIMIT
+                    && iterator.hasNext()) {
+                iterator.next();
+                iterator.remove();
+            }
+            profile.save();
+        });
+        session = local;
+        // ⚠ Follows the desk's own event stream rather than being poked from fourteen views. A hook
+        // per view is one new window away from a tool that never reports; the desk already publishes
+        // opened, raised, focused and closed at one chokepoint, which is what EventRecorder's own
+        // notes give as the reason for subscribing at the bus.
+        io.github.stoicswe.eyeandsickle.client.presence.RichPresence.shared().attach(session);
+        // Crossfades from the menu bed. See showMainMenu for why the cues are wired before any track
+        // exists to play through them.
+        io.github.stoicswe.eyeandsickle.client.sound.Audio.shared()
+                .music(io.github.stoicswe.eyeandsickle.client.sound.MusicCue.DECK);
+
+        Shell.CommandRegistry commands = BuiltinCommands.registry();
+        shell = new Shell(session, commands);
+        ClientCommands.register(
+                commands,
+                registry,
+                themes,
+                profile,
+                () -> shell.history(),
+                this::showMainMenu,
+                this::applyDeskSettings);
+        ManCommands.register(commands, terms);
+        // Pillar C1: everything the breach window can do, the terminal can do. Both go through the
+        // same GameSession port, so the two cannot disagree about what a move costs or whether it
+        // was allowed.
+        io.github.stoicswe.eyeandsickle.client.shell.BreachCommands.register(commands);
+        io.github.stoicswe.eyeandsickle.client.shell.NetCommands.register(commands);
+
+        registerWindows();
+        registry.onThemeChange(() -> themes.applyAll());
+
+        profile.settings().lastSoloSlot = slot;
+        profile.settings().soloHandle = session.handle();
+        profile.save();
+
+        // The boot log first. It reads the session that was just opened, so every figure it prints
+        // is this rig's — see BootSequence. The deck is built behind it and swapped in when it ends.
+        showBootSequence(() -> {
+            startDeck(stage);
+            startHeartbeat();
+            // ⚠ AFTER the deck exists, and only here. The report hangs off the balance cell's bounds,
+            // which are zero until the strip has laid out — and this is the one moment a load has to
+            // announce itself. Consuming it also means the LEDGER window will not repeat it.
+            deck.showChainSync();
+        });
+    }
+
+    /**
+     * Plays the uOS boot log, then hands over to the deck.
+     *
+     * <p>On its own Scene rather than layered over the deck: the deck's first paint includes a
+     * staggered panel reveal (§5), and having that happen underneath a boot log would mean the
+     * player's first sight of the desk was the tail end of an animation they never saw start.
+     */
+    private void showBootSequence(Runnable then) {
+        javafx.scene.layout.StackPane root = new javafx.scene.layout.StackPane();
+        io.github.stoicswe.eyeandsickle.client.ui.BootSequence boot =
+                io.github.stoicswe.eyeandsickle.client.ui.BootSequence.play(session, then);
+        root.getChildren().addAll(boot, boot.hint());
+        javafx.scene.layout.StackPane.setAlignment(boot.hint(), javafx.geometry.Pos.BOTTOM_CENTER);
+
+        Scene scene = scaled(
+                root, stage.getWidth() > 0 ? stage.getWidth() : 1280, stage.getHeight() > 0 ? stage.getHeight() : 800);
+        stage.setScene(scene);
+        themes.adopt(scene);
+        themes.applyAll();
+        // Focused so a keypress skips it without the player having to click the window first.
+        boot.requestFocus();
+    }
+
+    /**
+     * The application-wide shortcuts, from {@code docs/client/00} §6.3.
+     *
+     * <p>Every one of these has a GUI equivalent as well — a menu item, a Settings control or a
+     * button. Pillar <b>C1</b> is that the interface is the toolset; a keystroke that is the ONLY way
+     * to reach something is a hidden feature, not a shortcut.
+     */
+    /**
+     * Plays the capacity-upgrade log and reboot, then returns to the deck.
+     *
+     * <h2>⚠ THE UPGRADE HAS ALREADY HAPPENED BY THE TIME THIS RUNS</h2>
+     *
+     * The rules raise the ceiling on the tick ({@code ComputeLadder.reconcile}); this is the
+     * <em>announcement</em>. That ordering is deliberate and it is what makes the sequence safe to
+     * skip, safe to suppress under Reduce motion, and safe to miss entirely because the client was
+     * closed when the flash completed. An animation that owned the state change would be an
+     * accessibility setting that costs a purchase.
+     *
+     * <p>⚠ Its own Scene, like the boot log, for the same reason: the deck's return paints a
+     * staggered reveal (§5), and running that underneath would show the player the tail of an
+     * animation they never saw start.
+     */
+    private void showCapacityUpgrade(long from, long to, String name, Runnable then) {
+        javafx.scene.layout.StackPane root = new javafx.scene.layout.StackPane();
+        io.github.stoicswe.eyeandsickle.client.ui.RebootSequence reboot =
+                io.github.stoicswe.eyeandsickle.client.ui.RebootSequence.play(from, to, name, then);
+        root.getChildren().addAll(reboot, reboot.hint());
+        javafx.scene.layout.StackPane.setAlignment(reboot.hint(), javafx.geometry.Pos.BOTTOM_CENTER);
+
+        Scene scene = scaled(
+                root, stage.getWidth() > 0 ? stage.getWidth() : 1280, stage.getHeight() > 0 ? stage.getHeight() : 800);
+        stage.setScene(scene);
+        themes.adopt(scene);
+        themes.applyAll();
+        reboot.requestFocus();
+    }
+
+    /**
+     * The signed-in Bluesky client, or {@code null} when no account is configured.
+     *
+     * <p>⚠ Built once and reused, because signing in is a network round trip and a fresh one per
+     * COMS open would re-authenticate every time the player pressed {@code Shortcut+S}.
+     */
+    private io.github.stoicswe.eyeandsickle.client.bsky.BlueskyChat bluesky;
+
+    /**
+     * The DIRECT pane, or {@code null} when there is no account to show.
+     *
+     * <h2>⚠ The app password is read from the OS store and never held</h2>
+     *
+     * {@code SecretStores} answers from Keychain / Credential Manager / Secret Service; the password
+     * goes into {@code signIn} and out of scope. What is kept is the access token, inside the chat
+     * client. Nothing here writes a credential anywhere, and if the machine has no store the lookup
+     * comes back empty and the tab is simply absent.
+     */
+    private javafx.scene.layout.Region blueskyPane() {
+        String handle = profile.settings().blueskyHandle;
+        if (handle == null || handle.isBlank()) {
+            return null;
+        }
+        var secret = io.github.stoicswe.eyeandsickle.client.credentials.SecretStores.forThisMachine()
+                .lookup(handle);
+        if (secret.isEmpty()) {
+            return null;
+        }
+        if (bluesky == null) {
+            bluesky = new io.github.stoicswe.eyeandsickle.client.bsky.BlueskyChat(
+                    io.github.stoicswe.eyeandsickle.client.bsky.BlueskyChat.DEFAULT_PDS);
+        }
+        var chat = bluesky;
+        // ⚠ HANDS OVER THE CREDENTIALS; DOES NOT SIGN IN. This runs on the FX thread while a window
+        // is opening, and a network round trip here would freeze the deck. `DirectView` calls
+        // `ensureSignedIn` on its own background thread and shows whatever comes back.
+        //
+        // ⚠ This used to start sign-in on a virtual thread and build the view in the next statement,
+        // which asked `signedIn()` before it could possibly be true — so the pane said "no account
+        // connected" forever, for a connected account, and the sign-in's error message was thrown
+        // away. Two bugs from one ordering.
+        if (!chat.signedIn()) {
+            chat.credentials(handle, secret.get());
+        }
+        return io.github.stoicswe.eyeandsickle.client.view.DirectView.create(
+                chat, handle, profile.settings().blueskySyncSeconds, deckAlerts());
+    }
+
+    /**
+     * What DIRECT is allowed to do to the deck when a message arrives.
+     *
+     * <p>⚠ The two halves of the suppression rule live here because this is the only place that can
+     * answer either: the view has never known what a deck is, and the window manager has never known
+     * what a conversation is.
+     *
+     * <p>⚠ {@code WindowSpec.COMMS.id()} rather than a literal — the id keys saved desk layouts and
+     * accelerators, and a second spelling of it is one rename away from a notification rule that
+     * silently never suppresses.
+     */
+    private io.github.stoicswe.eyeandsickle.client.view.DirectView.Alerts deckAlerts() {
+        return new io.github.stoicswe.eyeandsickle.client.view.DirectView.Alerts() {
+            @Override
+            public boolean commsFocused() {
+                return deck != null
+                        && deck.desk()
+                                .focusedWindow()
+                                .map(window -> window.id()
+                                        .equals(io.github.stoicswe.eyeandsickle.client.window.WindowSpec.COMMS.id()))
+                                .orElse(false);
+            }
+
+            @Override
+            public void preview(String who, String snippet) {
+                if (deck == null) {
+                    return;
+                }
+                // ⚠ NOT severe. §2.1 rations the alarm colour to loss and hostile state, and a
+                // message from a friend is neither — a notice that shouted would spend the panel's
+                // whole alarm budget on somebody saying hello.
+                deck.notices().say("bsky", who + " — " + snippet, false);
+            }
+        };
+    }
+
+    private GlobalShortcuts.Handlers globalHandlers() {
+        return new GlobalShortcuts.Handlers() {
+            @Override
+            public void openPalette() {
+                if (shell != null && stage != null) {
+                    CommandPalette.show(stage, shell, () -> {});
+                }
+            }
+
+            @Override
+            public void cycleTheme() {
+                var order = io.github.stoicswe.eyeandsickle.client.theme.ThemeId.selectable();
+                int next = (order.indexOf(themes.current()) + 1) % order.size();
+                themes.select(order.get(next));
+                profile.save();
+            }
+
+            @Override
+            public void cycleTeaching() {
+                String level =
+                        switch (profile.settings().teachingLevel) {
+                            case "explain" -> "terms";
+                            case "terms" -> "off";
+                            default -> "explain";
+                        };
+                profile.settings().teachingLevel = level;
+                profile.save();
+            }
+
+            @Override
+            public void toggleLayout() {
+                // Was: switch between the docked layout and the multi-window desk. Both were
+                // replaced by the deck (§0), so the shortcut now toggles the thing the design
+                // language actually left open — §11 question 1, free-drag versus snap-to-grid.
+                profile.settings().freeDragWindows = !profile.settings().freeDragWindows;
+                profile.save();
+                applyDeskSettings();
+            }
+
+            @Override
+            public void cycleWindows() {
+                if (deck != null) {
+                    deck.desk().focusNext();
+                }
+            }
+
+            @Override
+            public void abort() {
+                if (shell == null) {
+                    return;
+                }
+                // Always confirms: `aborted` is a persisted outcome with real consequences, so a
+                // mis-key must not be able to spend one (docs/design/05 §4).
+                javafx.scene.control.Alert confirm = new javafx.scene.control.Alert(
+                        javafx.scene.control.Alert.AlertType.CONFIRMATION,
+                        "Abort the current operation? This is recorded as an outcome.",
+                        javafx.scene.control.ButtonType.CANCEL,
+                        javafx.scene.control.ButtonType.OK);
+                confirm.setHeaderText("Abort");
+                confirm.showAndWait()
+                        .filter(b -> b == javafx.scene.control.ButtonType.OK)
+                        .ifPresent(b -> shell.run("abort"));
+            }
+        };
+    }
+
+    /** Closes and persists any live session. Called before the menu and on exit. */
+    private void closeSession() {
+        // ⚠ FIRST, and before the bus it subscribed to goes away. Detaching drops the desk
+        // subscription and falls back to MENU, so a player who quits to the menu stops being
+        // reported as standing in a terminal on a character that is no longer open.
+        io.github.stoicswe.eyeandsickle.client.presence.RichPresence.shared().detach();
+        if (heartbeat != null) {
+            heartbeat.stop();
+            heartbeat = null;
+        }
+        if (autosave != null) {
+            autosave.stop();
+            autosave = null;
+        }
+        // ⚠ Order matters: the layout is captured BEFORE the deck is disposed, because disposing
+        // closes every window and there would be nothing left to record. Getting this backwards
+        // saves an empty desk over the player's arrangement, every time they quit.
+        if (session != null) {
+            saveEverything();
+        }
+        if (deck != null) {
+            deck.dispose();
+            deck = null;
+        }
+        registry.closeAll();
+        if (session != null) {
+            session.close();
+            session = null;
+        }
+    }
+
+    /**
+     * The deck: one undecorated Stage, the four regions §3 specifies, and a drawn window manager.
+     *
+     * <p>{@code docs/client/07-accessibility.md} §2.3's requirement that no functionality or
+     * information is lost carries over unchanged and is stronger here than it was under the docked
+     * layout: the compute readout is a cell in the top strip, which is chrome. There is no z-order
+     * for it to lose and no tab it can hide behind, which is client pillar <b>C2</b> made
+     * structural rather than maintained by hand.
+     */
+    private void startDeck(Stage stage) {
+        java.util.Map<WindowSpec, java.util.function.Function<WindowSpec, javafx.scene.layout.Region>> factories =
+                new java.util.EnumMap<>(WindowSpec.class);
+        for (WindowSpec spec : WindowSpec.values()) {
+            factories.put(spec, s -> (javafx.scene.layout.Region) contentFor(s));
+        }
+
+        deck = new io.github.stoicswe.eyeandsickle.client.ui.DeckShell(
+                session, shell, profile, factories, deckActions());
+        deck.attach(stage);
+
+        Scene scene = scaled(deck.root(), 1280, 800);
+        stage.setScene(scene);
+        // The deck comes up out of the dark rather than appearing whole. §5 allows step timing only,
+        // so this is the same nine-step DISCRETE ladder the panel reveal uses — which is also the
+        // truer effect, since a tube coming up to brightness rises through visible levels.
+        io.github.stoicswe.eyeandsickle.client.ui.Motion.fadeIn(
+                deck.root(), io.github.stoicswe.eyeandsickle.client.ui.UiTokens.WAKE_MS);
+        themes.adopt(scene);
+        themes.applyAll();
+        // Accelerators open a window ON THE DESK. Routing them through the registry's Stage path
+        // would open a second OS window and break §0's whole premise from a keystroke.
+        registry.installAllAccelerators(scene, deck::show);
+        // The map's BREACH control raises the breach window without knowing a deck exists. Wired
+        // here because this is the first moment there is a deck to raise it on.
+        //
+        // ⚠ ITS OWN WINDOW SINCE UI-8 (2026-08-08). It was a tab in the NETWORK tool, which meant the
+        // map and the board could not be on screen together — the simultaneity docs/client/05 §44
+        // says the puzzle's anti-bot property (I10) depends on. A standalone window is also why the
+        // second door, `focusBreach`, could be deleted: raising a window IS showing it.
+        //
+        // ⚠ NOT a WindowSpec, deliberately, and the same argument PortScanView records. The catalogue
+        // is the set of tools a player owns and may open at any time; a breach is an ACT against a
+        // specific machine with a duration, and a rail key for it would open a board with nothing on
+        // it. It is opened by arming, exactly as a shell is opened by connecting.
+        arming.setOpener(() -> deck.showShell(
+                BREACH_WINDOW,
+                io.github.stoicswe.eyeandsickle.client.i18n.Text.current().ui("ui.breach.window-title", "Breach"),
+                io.github.stoicswe.eyeandsickle.client.view.BreachView.create(session, terms, profile, arming),
+                // ⚠ Nothing to release. An attempt is the RULES' state, held in the save, and it
+                // survives the window going away — closing the board is not abandoning the breach,
+                // which is a deliberate act with its own control and its own cost.
+                null));
+
+        // ⚠ THE DEFENCE ROUND'S ONE DOOR. Everything that can start one goes through here, so a
+        // round cannot be opened without the firewall tier being read off the rig and the outcome
+        // being routed somewhere — the join this project keeps shipping broken.
+        defense.setOpener((subject, attackerVirusTier, onResolved) -> {
+            int firewall = 0;
+            boolean tarpit = false;
+            boolean daemon = false;
+            for (var armed : session.defenses()) {
+                String kind = armed.kind() == null ? "" : armed.kind();
+                if (kind.startsWith("firewall")) {
+                    firewall = Math.max(firewall, armed.tier());
+                }
+                // ⚠ Read off what is ARMED, never off what is owned. `design/09` §3's whole tension is
+                // that a defence costs standing compute — a rig that bought a Tarpit and never armed
+                // it has paid nothing and must get nothing.
+                tarpit |= kind.startsWith("tarpit");
+                daemon |= kind.startsWith("auto-counter");
+            }
+            // ⚠ A LAYER, NOT A WINDOW, and the outcome is routed through the close handle so the
+            // deck cannot be left wearing the horror after a round has resolved.
+            Runnable[] close = new Runnable[1];
+            boolean[] lost = {false};
+            var round = io.github.stoicswe.eyeandsickle.client.view.DefenseGameView.create(
+                    session,
+                    subject,
+                    firewall,
+                    tarpit,
+                    daemon,
+                    attackerVirusTier,
+                    session.now().toEpochMilli(),
+                    outcome -> {
+                        lost[0] = outcome
+                                == io.github.stoicswe.eyeandsickle.client.view.DefenseGameView.Outcome.BREACHED;
+                        if (close[0] != null) {
+                            close[0].run();
+                        }
+                        // ⚠ The CONSEQUENCE is applied now and does not wait for the deck to finish
+                        // putting itself back. Whether an intrusion landed is game state; the exit is
+                        // an animation, and holding a rules outcome behind one would make what the
+                        // save contains depend on how long a fade takes.
+                        onResolved.accept(outcome);
+                    },
+                    // ⚠ The DECK loses its colour depth in step with the round, and the round is what
+                    // says when: it owns the clock, and two surfaces reading a countdown separately
+                    // is two surfaces that can disagree about how far through it is.
+                    deck::posterizeDeck);
+            // ⚠ The bloom is the AFTERMATH and starts only once the horror has fully drained — two
+            // effects fading through each other on one layer read as a rendering fault rather than as
+            // one thing ending and another beginning.
+            close[0] = deck.showDefence(round, () -> {
+                if (lost[0]) {
+                    deck.bloodPulse(BLOOD_PULSE_SECONDS);
+                }
+            });
+        });
+        // ⚠ SOMEBODY COMING FOR YOU OPENS THE ROUND — docs/design/19 §9, and this is the JOIN that
+        // makes the ambient roll a mechanic rather than a log line. The rules record a pending
+        // attempt on the save; this is the one thing that reads it.
+        //
+        // ⚠ Guarded against opening twice. `onChange` fires on most ticks and the attempt stays on
+        // the save until it is settled, so without the flag every tick during a round would open
+        // another one on top of it.
+        boolean[] defending = {false};
+        session.onChange(state -> {
+            if (defending[0] || defense.isOpen()) {
+                return;
+            }
+            session.pendingIntrusion().ifPresent(coming -> {
+                defending[0] = true;
+                defense.open("someone is breaking in from " + coming.address(), coming.virusTier(), outcome -> {
+                    defending[0] = false;
+                    // ⚠ The RULES settle it. The view reports which way the round went and the engine
+                    // decides what that costs — a client that applied the consequence would be
+                    // authoritative over exactly what a cheater forges.
+                    session.resolvePendingIntrusion(
+                            outcome == io.github.stoicswe.eyeandsickle.client.view.DefenseGameView.Outcome.HELD);
+                });
+            });
+        });
+        GlobalShortcuts.install(scene, globalHandlers());
+
+        // Escape opens the pause menu. A filter rather than a handler, so it fires even while a text
+        // field has focus — a player who has just typed a command and wants out should not have to
+        // click elsewhere first. What it actually does is DeckShell's decision, because the innermost
+        // thing wins: a half-typed command clears before the menu opens.
+        scene.addEventFilter(javafx.scene.input.KeyEvent.KEY_PRESSED, e -> {
+            if (e.getCode() == javafx.scene.input.KeyCode.ESCAPE) {
+                e.consume();
+                deck.handleEscape();
+            }
+        });
+        deck.applyRoundedSetting();
+        deck.applyControlOrderSetting();
+        deck.restoreLayout();
+    }
+
+    /**
+     * What the map's right-click menu does.
+     *
+     * <p>⚠ The shell is opened by asking the <b>rules</b> first and only then making a window. A
+     * window created before the session exists would be a shell attached to nothing — and the refusal
+     * (no foothold, not enough cycles) is exactly the message the player needs, which they would
+     * never see behind a window that had already opened.
+     */
+    private NetMapView.NodeActions nodeActions() {
+        return new NetMapView.NodeActions() {
+            @Override
+            public void openShell(String address) {
+                boolean already =
+                        session.sessions().stream().anyMatch(s -> s.address().equals(address));
+                if (!already) {
+                    GameSession.Outcome outcome = session.openSession(address);
+                    if (!outcome.succeeded()) {
+                        // The refusal is already in the log — announce() put it there — so there is
+                        // nothing to print here. Not opening the window IS the response.
+                        return;
+                    }
+                }
+                if (deck == null) {
+                    return;
+                }
+                deck.showShell(
+                        address,
+                        "Shell — " + address,
+                        NodeShellView.create(session, address, () -> deck.closeShell(address)),
+                        // ⚠ Closes the SESSION, not the window. The window is already going — this
+                        // is what hands its two cycles back. Pointing it at closeShell (as it was)
+                        // asked the desk to close a window it was in the middle of closing, which
+                        // did nothing and left the allocation held forever.
+                        () -> session.closeSession(address));
+            }
+
+            /**
+             * The map's node menu: aim, jump to the tab, and go — one gesture.
+             *
+             * <h2>⚠ THE ONLY ENTRY POINT EXEMPT FROM THE TWO-STEP, and the fence is in BreachArming</h2>
+             *
+             * Arming is normally free and reversible, and START BREACH is the commitment, because a
+             * breach reserves compute that no outcome refunds. That rule was written against a
+             * <b>reflowing list</b> — aim at row three, a sweep lands, the rows move, and row three is
+             * a different machine you have already committed to. A per-node context menu cannot do
+             * that: the machine and the verb are the same gesture on the same object.
+             *
+             * <h2>⚠ THE ORDER OF THESE THREE CALLS IS LOAD-BEARING</h2>
+             *
+             * {@code armAndStart} records the request first, so it is already set whichever way the
+             * next line goes: if the window is <b>closed</b>, {@code open()} builds the breach panel
+             * and its first refresh picks the request up; if it is <b>already open</b>, the notify
+             * inside {@code armAndStart} reaches the live panel. Recording it after {@code open()}
+             * would miss the second case entirely — and that is the common one, since the player is
+             * looking at the map inside this very window when they right-click.
+             *
+             * <p>⚠ Two calls, not three. {@code focusBreach()} used to come last, to select the tab
+             * that {@code open()} had just built; the breach is its own window since UI-8, so opening
+             * it is the whole of showing it.
+             */
+            @Override
+            public void breach(String address) {
+                arming.armAndStart("node:" + address);
+                arming.open();
+            }
+
+            /**
+             * ⚠ Opened as a SHELL-style window, not a catalogue one.
+             *
+             * <p>The desk's {@code showShell} keys a window on a string and reuses it, which is
+             * exactly the shape a per-machine tool needs: two scanners open on two machines, one per
+             * machine, and reopening raises the one that is already there. Adding it to
+             * {@code WindowSpec} instead would put it in the rail, where it would open with no
+             * target and have nothing to be about.
+             */
+            @Override
+            public void portScan(String address) {
+                if (deck == null) {
+                    return;
+                }
+                String key = "portscan:" + address;
+                deck.showShell(
+                        key,
+                        "Port scan - " + address,
+                        // ⚠ Swallowed here, not printed twice. Every Outcome this panel produces has already
+                        // reached the rig log through the session, and a second copy in a window
+                        // would be the same sentence in two places — which is how a player comes to
+                        // believe two things happened.
+                        PortScanView.create(session, address, message -> {}),
+                        // ⚠ Nothing to release. A scanner or a report is a VIEW onto state that exists
+                        // whether or not it is on screen — unlike a shell, which is an
+                        // instance holding cycles for as long as it lives.
+                        null);
+            }
+
+            /** Same per-subject window shape as the scanner — one file open per machine. */
+            @Override
+            public void info(String address) {
+                if (deck == null) {
+                    return;
+                }
+                String key = "report:" + address;
+                deck.showShell(
+                        key,
+                        "Report - " + address,
+                        io.github.stoicswe.eyeandsickle.client.view.NodeReportView.create(session, address),
+                        // ⚠ Nothing to release. A scanner or a report is a VIEW onto state that exists
+                        // whether or not it is on screen — unlike a shell, which is an
+                        // instance holding cycles for as long as it lives.
+                        null);
+            }
+        };
+    }
+
+    private io.github.stoicswe.eyeandsickle.client.ui.DeckShell.Actions deckActions() {
+        return new io.github.stoicswe.eyeandsickle.client.ui.DeckShell.Actions() {
+            @Override
+            public void openPalette() {
+                globalHandlers().openPalette();
+            }
+
+            @Override
+            public void runCommand(String line) {
+                shell.run(line);
+            }
+
+            @Override
+            public void backToMenu() {
+                showMainMenu();
+            }
+
+            @Override
+            public void quit() {
+                shutdown();
+                javafx.application.Platform.exit();
+            }
+
+            @Override
+            public void save() {
+                // Everything shutdown() would write, without ending anything. The desk layout is
+                // included because the arrangement is part of what a player means by "save my
+                // game", even though it lives in the profile rather than the save file.
+                saveEverything();
+            }
+        };
+    }
+
+    /**
+     * Tells the registry how to build every window.
+     *
+     * <p>Registered up front rather than lazily, so a missing view is a startup failure rather than a
+     * click that silently does nothing. The switcher lists every window in the catalogue and every one
+     * of them must open.
+     */
+    /**
+     * One place that knows how to build each window's content.
+     *
+     * <p>Shared by both layouts on purpose. If the docked shell built its own views, "no
+     * functionality is lost" would be a promise maintained by hand, and the two would drift the first
+     * time somebody improved one of them.
+     */
+    private javafx.scene.Node contentFor(WindowSpec spec) {
+        return switch (spec) {
+            // ⚠ The unmount handler is what makes the rig monitor's "Free" complete for a shell:
+            // the view ends the session through the port, and this takes the window off the desk.
+            // Both halves, or a terminal stays on screen answering nothing.
+            case RIG_MONITOR -> RigMonitorView.create(
+                    session, terms, profile, null, address -> deck.closeShell(address));
+            case TERMINAL -> TerminalView.create(shell);
+            case NETMAP ->
+                io.github.stoicswe.eyeandsickle.client.view.NetworkView.create(
+                        session, arming, nodeActions(), terms, profile);
+            case STORAGE -> Views.storage(session);
+            case LEDGER -> Views.ledger(session);
+            case SETTINGS ->
+                Views.settings(
+                        profile,
+                        themes,
+                        this::applyDeskSettings,
+                        this::renameOperator,
+                        this::applyWindowSettings,
+                        session,
+                        defense);
+            case CALC -> CalcView.create();
+            case FILES -> FileManagerView.create(session);
+            case MAN -> ManView.create(terms);
+            case LOG -> LogView.create(session);
+            // ⚠ The refresh cadence is read HERE, at open, not cached — a player who moves the
+            // slider and reopens the window gets the new rate without a restart.
+            case SECURITY -> io.github.stoicswe.eyeandsickle.client.view.SecurityCenterView.create(session, shell);
+            case ASSEMBL -> io.github.stoicswe.eyeandsickle.client.view.AssemblView.create(session);
+            case MARKET ->
+                io.github.stoicswe.eyeandsickle.client.view.MarketView.create(
+                        session, profile.settings().stockRefreshSeconds);
+            // ⚠ RECON is the reports now, not the page about them. The cost model and what a scan
+            // is a model of moved to `man port-scan` — reference a player reads once, in the place
+            // they can find it deliberately, rather than above the data every single time.
+            // ⚠ null for the DIRECT pane: the Bluesky wrapper is not wired yet, and CommsView
+            // omits the tab entirely rather than showing an empty one. A tab that exists and does
+            // nothing reads as broken; a tab that is absent reads as not configured.
+            // ⚠ The DIRECT pane is built only when an account is connected, and CommsView omits
+            // the tab entirely when it is null — a tab that exists and does nothing reads as broken,
+            // where an absent one reads as not configured.
+            //
+            // ⚠ Sign-in happens on a VIRTUAL thread inside the pane, never here: this runs on the
+            // FX thread while a window is opening, and a round trip to somebody else's PDS would
+            // freeze the deck for however long they take to answer.
+            case COMMS -> CommsView.create(session, blueskyPane());
+            case NOTES -> NotesView.create(session);
+        };
+    }
+
+    private void registerWindows() {
+        for (WindowSpec spec : WindowSpec.values()) {
+            registry.register(spec, s -> (Parent) contentFor(s));
+        }
+    }
+
+    /**
+     * Advances the game and autosaves.
+     *
+     * <p>One second is fast enough that self-mining income looks continuous and slow enough to cost
+     * nothing. Autosave is deliberately much rarer: writing every second would enter the atomic-write
+     * window sixty times a minute for no benefit, and the engine's catch-up on load makes a lost
+     * minute recoverable anyway.
+     */
+    private void startHeartbeat() {
+        heartbeat = new Timeline(new KeyFrame(Duration.seconds(1), e -> session.tick()));
+        heartbeat.setCycleCount(Animation.INDEFINITE);
+        heartbeat.play();
+
+        autosave = new Timeline(new KeyFrame(Duration.seconds(30), e -> saveEverything()));
+        autosave.setCycleCount(Animation.INDEFINITE);
+        autosave.play();
+    }
+
+    private void shutdown() {
+        closeSession();
+        // ⚠ CLEARS the activity on the way out rather than merely stopping updates. Discord clears a
+        // dead process's presence on its own eventually, and "eventually" is a window in which the
+        // player's friends are still being told they are in a breach after they have quit.
+        io.github.stoicswe.eyeandsickle.client.presence.RichPresence.shared().close();
+        // ⚠ Releases the audio device rather than relying on the daemon threads dying with the JVM.
+        // Both are daemons, so the cost of skipping this is not a leak — but an audio device still
+        // held by an application that has visibly closed is something macOS shows the player.
+        io.github.stoicswe.eyeandsickle.client.sound.Audio.shared().close();
+        profile.save();
+    }
+
+    @Override
+    public void stop() {
+        shutdown();
+    }
+}

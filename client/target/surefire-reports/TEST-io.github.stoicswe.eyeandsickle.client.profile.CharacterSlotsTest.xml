@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="io.github.stoicswe.eyeandsickle.client.profile.CharacterSlotsTest" time="0.23" tests="13" errors="0" skipped="0" failures="0" flakes="0">
+  <properties>
+    <property name="java.specification.version" value="26"/>
+    <property name="javafx.runtime.version" value="26.0.2+3"/>
+    <property name="sun.jnu.encoding" value="UTF-8"/>
+    <property name="java.class.path" value="/Users/stoicswe/Github/The-Eye-and-Sickle/client/target/test-classes:/Users/stoicswe/Github/The-Eye-and-Sickle/client/target/classes:/Users/stoicswe/.m2/repository/org/springframework/spring-context/7.0.8/spring-context-7.0.8.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-aop/7.0.8/spring-aop-7.0.8.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-beans/7.0.8/spring-beans-7.0.8.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-core/7.0.8/spring-core-7.0.8.jar:/Users/stoicswe/.m2/repository/commons-logging/commons-logging/1.3.5/commons-logging-1.3.5.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-expression/7.0.8/spring-expression-7.0.8.jar:/Users/stoicswe/.m2/repository/io/micrometer/micrometer-observation/1.16.6/micrometer-observation-1.16.6.jar:/Users/stoicswe/.m2/repository/io/micrometer/micrometer-commons/1.16.6/micrometer-commons-1.16.6.jar:/Users/stoicswe/Github/The-Eye-and-Sickle/protocol/target/eyeandsickle-protocol-0.1.0-SNAPSHOT.jar:/Users/stoicswe/.m2/repository/io/github/erdtman/java-json-canonicalization/1.1/java-json-canonicalization-1.1.jar:/Users/stoicswe/.m2/repository/tools/jackson/core/jackson-databind/3.1.4/jackson-databind-3.1.4.jar:/Users/stoicswe/.m2/repository/com/fasterxml/jackson/core/jackson-annotations/2.21/jackson-annotations-2.21.jar:/Users/stoicswe/.m2/repository/tools/jackson/core/jackson-core/3.1.4/jackson-core-3.1.4.jar:/Users/stoicswe/.m2/repository/org/bouncycastle/bcprov-jdk18on/1.82/bcprov-jdk18on-1.82.jar:/Users/stoicswe/Github/The-Eye-and-Sickle/engine/target/eyeandsickle-engine-0.1.0-SNAPSHOT.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-jdbc/7.0.8/spring-jdbc-7.0.8.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-tx/7.0.8/spring-tx-7.0.8.jar:/Users/stoicswe/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar:/Users/stoicswe/.m2/repository/org/flywaydb/flyway-core/12.4.0/flyway-core-12.4.0.jar:/Users/stoicswe/Github/The-Eye-and-Sickle/engine/target/eyeandsickle-engine-0.1.0-SNAPSHOT-tests.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-controls/26.0.2/javafx-controls-26.0.2.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-controls/26.0.2/javafx-controls-26.0.2-mac-aarch64.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-graphics/26.0.2/javafx-graphics-26.0.2.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-graphics/26.0.2/javafx-graphics-26.0.2-mac-aarch64.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-base/26.0.2/javafx-base-26.0.2.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-base/26.0.2/javafx-base-26.0.2-mac-aarch64.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-fxml/26.0.2/javafx-fxml-26.0.2.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-fxml/26.0.2/javafx-fxml-26.0.2-mac-aarch64.jar:/Users/stoicswe/.m2/repository/org/junit/jupiter/junit-jupiter/6.1.2/junit-jupiter-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/jupiter/junit-jupiter-api/6.1.2/junit-jupiter-api-6.1.2.jar:/Users/stoicswe/.m2/repository/org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar:/Users/stoicswe/.m2/repository/org/junit/platform/junit-platform-commons/6.1.2/junit-platform-commons-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/jupiter/junit-jupiter-params/6.1.2/junit-jupiter-params-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/jupiter/junit-jupiter-engine/6.1.2/junit-jupiter-engine-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/platform/junit-platform-launcher/6.1.2/junit-platform-launcher-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/platform/junit-platform-engine/6.1.2/junit-platform-engine-6.1.2.jar:/Users/stoicswe/.m2/repository/org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar:/Users/stoicswe/.m2/repository/org/jspecify/jspecify/1.0.0/jspecify-1.0.0.jar:/Users/stoicswe/.m2/repository/org/assertj/assertj-core/3.27.7/assertj-core-3.27.7.jar:/Users/stoicswe/.m2/repository/net/bytebuddy/byte-buddy/1.18.3/byte-buddy-1.18.3.jar:"/>
+    <property name="java.vm.vendor" value="Homebrew"/>
+    <property name="sun.arch.data.model" value="64"/>
+    <property name="java.vendor.url" value="https://github.com/Homebrew/homebrew-core/issues"/>
+    <property name="user.timezone" value="America/New_York"/>
+    <property name="javafx.version" value="26.0.2"/>
+    <property name="os.name" value="Mac OS X"/>
+    <property name="java.vm.specification.version" value="26"/>
+    <property name="sun.java.launcher" value="SUN_STANDARD"/>
+    <property name="user.country" value="US"/>
+    <property name="sun.boot.library.path" value="/opt/homebrew/Cellar/openjdk/26.0.1/libexec/openjdk.jdk/Contents/Home/lib"/>
+    <property name="sun.java.command" value="/Users/stoicswe/Github/The-Eye-and-Sickle/client/target/surefire/surefirebooter-20260811130901111_29.jar /Users/stoicswe/Github/The-Eye-and-Sickle/client/target/surefire 2026-08-11T13-05-39_444-jvmRun1 surefire-20260811130901111_27tmp surefire_3-20260811130901111_28tmp"/>
+    <property name="http.nonProxyHosts" value="local|*.local|169.254/16|*.169.254/16"/>
+    <property name="jdk.debug" value="release"/>
+    <property name="surefire.test.class.path" value="/Users/stoicswe/Github/The-Eye-and-Sickle/client/target/test-classes:/Users/stoicswe/Github/The-Eye-and-Sickle/client/target/classes:/Users/stoicswe/.m2/repository/org/springframework/spring-context/7.0.8/spring-context-7.0.8.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-aop/7.0.8/spring-aop-7.0.8.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-beans/7.0.8/spring-beans-7.0.8.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-core/7.0.8/spring-core-7.0.8.jar:/Users/stoicswe/.m2/repository/commons-logging/commons-logging/1.3.5/commons-logging-1.3.5.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-expression/7.0.8/spring-expression-7.0.8.jar:/Users/stoicswe/.m2/repository/io/micrometer/micrometer-observation/1.16.6/micrometer-observation-1.16.6.jar:/Users/stoicswe/.m2/repository/io/micrometer/micrometer-commons/1.16.6/micrometer-commons-1.16.6.jar:/Users/stoicswe/Github/The-Eye-and-Sickle/protocol/target/eyeandsickle-protocol-0.1.0-SNAPSHOT.jar:/Users/stoicswe/.m2/repository/io/github/erdtman/java-json-canonicalization/1.1/java-json-canonicalization-1.1.jar:/Users/stoicswe/.m2/repository/tools/jackson/core/jackson-databind/3.1.4/jackson-databind-3.1.4.jar:/Users/stoicswe/.m2/repository/com/fasterxml/jackson/core/jackson-annotations/2.21/jackson-annotations-2.21.jar:/Users/stoicswe/.m2/repository/tools/jackson/core/jackson-core/3.1.4/jackson-core-3.1.4.jar:/Users/stoicswe/.m2/repository/org/bouncycastle/bcprov-jdk18on/1.82/bcprov-jdk18on-1.82.jar:/Users/stoicswe/Github/The-Eye-and-Sickle/engine/target/eyeandsickle-engine-0.1.0-SNAPSHOT.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-jdbc/7.0.8/spring-jdbc-7.0.8.jar:/Users/stoicswe/.m2/repository/org/springframework/spring-tx/7.0.8/spring-tx-7.0.8.jar:/Users/stoicswe/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar:/Users/stoicswe/.m2/repository/org/flywaydb/flyway-core/12.4.0/flyway-core-12.4.0.jar:/Users/stoicswe/Github/The-Eye-and-Sickle/engine/target/eyeandsickle-engine-0.1.0-SNAPSHOT-tests.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-controls/26.0.2/javafx-controls-26.0.2.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-controls/26.0.2/javafx-controls-26.0.2-mac-aarch64.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-graphics/26.0.2/javafx-graphics-26.0.2.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-graphics/26.0.2/javafx-graphics-26.0.2-mac-aarch64.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-base/26.0.2/javafx-base-26.0.2.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-base/26.0.2/javafx-base-26.0.2-mac-aarch64.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-fxml/26.0.2/javafx-fxml-26.0.2.jar:/Users/stoicswe/.m2/repository/org/openjfx/javafx-fxml/26.0.2/javafx-fxml-26.0.2-mac-aarch64.jar:/Users/stoicswe/.m2/repository/org/junit/jupiter/junit-jupiter/6.1.2/junit-jupiter-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/jupiter/junit-jupiter-api/6.1.2/junit-jupiter-api-6.1.2.jar:/Users/stoicswe/.m2/repository/org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar:/Users/stoicswe/.m2/repository/org/junit/platform/junit-platform-commons/6.1.2/junit-platform-commons-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/jupiter/junit-jupiter-params/6.1.2/junit-jupiter-params-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/jupiter/junit-jupiter-engine/6.1.2/junit-jupiter-engine-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/platform/junit-platform-launcher/6.1.2/junit-platform-launcher-6.1.2.jar:/Users/stoicswe/.m2/repository/org/junit/platform/junit-platform-engine/6.1.2/junit-platform-engine-6.1.2.jar:/Users/stoicswe/.m2/repository/org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar:/Users/stoicswe/.m2/repository/org/jspecify/jspecify/1.0.0/jspecify-1.0.0.jar:/Users/stoicswe/.m2/repository/org/assertj/assertj-core/3.27.7/assertj-core-3.27.7.jar:/Users/stoicswe/.m2/repository/net/bytebuddy/byte-buddy/1.18.3/byte-buddy-1.18.3.jar:"/>
+    <property name="sun.cpu.endian" value="little"/>
+    <property name="user.home" value="/Users/stoicswe"/>
+    <property name="user.language" value="en"/>
+    <property name="java.specification.vendor" value="Oracle Corporation"/>
+    <property name="java.version.date" value="2026-04-21"/>
+    <property name="java.home" value="/opt/homebrew/Cellar/openjdk/26.0.1/libexec/openjdk.jdk/Contents/Home"/>
+    <property name="file.separator" value="/"/>
+    <property name="basedir" value="/Users/stoicswe/Github/The-Eye-and-Sickle/client"/>
+    <property name="java.vm.compressedOopsMode" value="Non-zero disjoint base"/>
+    <property name="line.separator" value="&#10;"/>
+    <property name="java.vm.specification.vendor" value="Oracle Corporation"/>
+    <property name="java.specification.name" value="Java Platform API Specification"/>
+    <property name="apple.awt.application.name" value="EAS uOS Client"/>
+    <property name="surefire.real.class.path" value="/Users/stoicswe/Github/The-Eye-and-Sickle/client/target/surefire/surefirebooter-20260811130901111_29.jar"/>
+    <property name="polyglot.engine.WarnInterpreterOnly" value="false"/>
+    <property name="sun.management.compiler" value="HotSpot 64-Bit Tiered Compilers"/>
+    <property name="ftp.nonProxyHosts" value="local|*.local|169.254/16|*.169.254/16"/>
+    <property name="java.runtime.version" value="26.0.1"/>
+    <property name="user.name" value="stoicswe"/>
+    <property name="stdout.encoding" value="UTF-8"/>
+    <property name="path.separator" value=":"/>
+    <property name="os.version" value="27.0"/>
+    <property name="java.runtime.name" value="OpenJDK Runtime Environment"/>
+    <property name="file.encoding" value="UTF-8"/>
+    <property name="java.vm.name" value="OpenJDK 64-Bit Server VM"/>
+    <property name="java.vendor.version" value="Homebrew"/>
+    <property name="localRepository" value="/Users/stoicswe/.m2/repository"/>
+    <property name="java.vendor.url.bug" value="https://github.com/Homebrew/homebrew-core/issues"/>
+    <property name="java.io.tmpdir" value="/var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/"/>
+    <property name="java.version" value="26.0.1"/>
+    <property name="user.dir" value="/Users/stoicswe/Github/The-Eye-and-Sickle/client"/>
+    <property name="os.arch" value="aarch64"/>
+    <property name="java.vm.specification.name" value="Java Virtual Machine Specification"/>
+    <property name="native.encoding" value="UTF-8"/>
+    <property name="java.library.path" value="/Users/stoicswe/Library/Java/Extensions:/Library/Java/Extensions:/Network/Library/Java/Extensions:/System/Library/Java/Extensions:/usr/lib/java:."/>
+    <property name="java.vm.info" value="mixed mode, sharing"/>
+    <property name="stderr.encoding" value="UTF-8"/>
+    <property name="java.vendor" value="Homebrew"/>
+    <property name="dist.skip" value="true"/>
+    <property name="java.vm.version" value="26.0.1"/>
+    <property name="stdin.encoding" value="UTF-8"/>
+    <property name="glass.appName" value="EAS uOS Client"/>
+    <property name="sun.io.unicode.encoding" value="UnicodeBig"/>
+    <property name="socksNonProxyHosts" value="local|*.local|169.254/16|*.169.254/16"/>
+    <property name="java.class.version" value="70.0"/>
+  </properties>
+  <testcase name="threeSlots(Path)" classname="save slots" time="0.039">
+    <system-err><![CDATA[Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: opening character database at /var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-11658821481954033623/characters
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.FlywayExecutor info
+INFO: Database: jdbc:h2:file:/var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-11658821481954033623/characters (H2 2.3)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Schema history table "public"."flyway_schema_history" does not exist yet
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbValidate info
+INFO: Successfully validated 1 migration (execution time 00:00.000s)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Creating Schema History table "public"."flyway_schema_history" ...
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Current version of schema "public": << Empty Schema >>
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Migrating schema "public" to version "7 - engine state"
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Successfully applied 1 migration to schema "public", now at version v7 (execution time 00:00.001s)
+Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: character database ready at schema version 7 (1 migration(s) applied)
+]]></system-err>
+  </testcase>
+  <testcase name="emptySlots(Path)" classname="save slots" time="0.021">
+    <system-err><![CDATA[Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: opening character database at /var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-12036785500054404339/characters
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.FlywayExecutor info
+INFO: Database: jdbc:h2:file:/var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-12036785500054404339/characters (H2 2.3)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Schema history table "public"."flyway_schema_history" does not exist yet
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbValidate info
+INFO: Successfully validated 1 migration (execution time 00:00.000s)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Creating Schema History table "public"."flyway_schema_history" ...
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Current version of schema "public": << Empty Schema >>
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Migrating schema "public" to version "7 - engine state"
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Successfully applied 1 migration to schema "public", now at version v7 (execution time 00:00.000s)
+Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: character database ready at schema version 7 (1 migration(s) applied)
+]]></system-err>
+  </testcase>
+  <testcase name="occupiedSlot(Path)" classname="save slots" time="0.088">
+    <system-err><![CDATA[Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: opening character database at /var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-5384979408137287668/characters
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.FlywayExecutor info
+INFO: Database: jdbc:h2:file:/var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-5384979408137287668/characters (H2 2.3)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Schema history table "public"."flyway_schema_history" does not exist yet
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbValidate info
+INFO: Successfully validated 1 migration (execution time 00:00.001s)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Creating Schema History table "public"."flyway_schema_history" ...
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Current version of schema "public": << Empty Schema >>
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Migrating schema "public" to version "7 - engine state"
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Successfully applied 1 migration to schema "public", now at version v7 (execution time 00:00.000s)
+Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: character database ready at schema version 7 (1 migration(s) applied)
+]]></system-err>
+  </testcase>
+  <testcase name="corruptSlotIsVisible(Path)" classname="save slots" time="0.019">
+    <system-err><![CDATA[Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: opening character database at /var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-7534907287506122960/characters
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.FlywayExecutor info
+INFO: Database: jdbc:h2:file:/var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-7534907287506122960/characters (H2 2.3)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Schema history table "public"."flyway_schema_history" does not exist yet
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbValidate info
+INFO: Successfully validated 1 migration (execution time 00:00.000s)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Creating Schema History table "public"."flyway_schema_history" ...
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Current version of schema "public": << Empty Schema >>
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Migrating schema "public" to version "7 - engine state"
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Successfully applied 1 migration to schema "public", now at version v7 (execution time 00:00.000s)
+Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: character database ready at schema version 7 (1 migration(s) applied)
+Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.client.profile.CharacterSlots readSlot
+SEVERE: slot 3 could not be read
+io.github.stoicswe.eyeandsickle.engine.save.SaveStore$UnreadableSaveException: Game state for character 7fde1922-e5b7-374a-bcb5-026f3867c5e2 is not readable
+	at io.github.stoicswe.eyeandsickle.engine.save.JdbcSaveStore.parse(JdbcSaveStore.java:107)
+	at java.base/java.util.Optional.map(Optional.java:264)
+	at io.github.stoicswe.eyeandsickle.engine.save.JdbcSaveStore.load(JdbcSaveStore.java:95)
+	at io.github.stoicswe.eyeandsickle.client.profile.CharacterSlots.readSlot(CharacterSlots.java:114)
+	at io.github.stoicswe.eyeandsickle.client.profile.CharacterSlots.soloSlots(CharacterSlots.java:104)
+	at io.github.stoicswe.eyeandsickle.client.profile.CharacterSlotsTest$Slots.corruptSlotIsVisible(CharacterSlotsTest.java:91)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:104)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:565)
+	at org.junit.platform.commons.util.ReflectionUtils.invokeMethod(ReflectionUtils.java:700)
+	at org.junit.platform.commons.support.ReflectionSupport.invokeMethod(ReflectionSupport.java:528)
+	at org.junit.jupiter.engine.support.MethodReflectionUtils.invoke(MethodReflectionUtils.java:53)
+	at org.junit.jupiter.engine.execution.MethodInvocation.proceed(MethodInvocation.java:61)
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain$ValidatingInvocation.proceed(InvocationInterceptorChain.java:124)
+	at org.junit.jupiter.engine.extension.TimeoutExtension.intercept(TimeoutExtension.java:163)
+	at org.junit.jupiter.engine.extension.TimeoutExtension.interceptTestableMethod(TimeoutExtension.java:148)
+	at org.junit.jupiter.engine.extension.TimeoutExtension.interceptTestMethod(TimeoutExtension.java:86)
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker$ReflectiveInterceptorCall.lambda$ofVoidMethod$0(InterceptingExecutableInvoker.java:124)
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.lambda$invoke$0(InterceptingExecutableInvoker.java:105)
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain$InterceptedInvocation.proceed(InvocationInterceptorChain.java:99)
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.proceed(InvocationInterceptorChain.java:66)
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.chainAndInvoke(InvocationInterceptorChain.java:47)
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.invoke(InvocationInterceptorChain.java:39)
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.invoke(InterceptingExecutableInvoker.java:104)
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.invoke(InterceptingExecutableInvoker.java:98)
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.invokeVoid(InterceptingExecutableInvoker.java:71)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.lambda$invokeTestMethod$0(TestMethodTestDescriptor.java:219)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:74)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.invokeTestMethod(TestMethodTestDescriptor.java:215)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.execute(TestMethodTestDescriptor.java:157)
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.execute(TestMethodTestDescriptor.java:70)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$2(NodeTestTask.java:176)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:74)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$1(NodeTestTask.java:166)
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:139)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$0(NodeTestTask.java:164)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:74)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:163)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:116)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1612)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:42)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$2(NodeTestTask.java:180)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:74)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$1(NodeTestTask.java:166)
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:139)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$0(NodeTestTask.java:164)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:74)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:163)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:116)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1612)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:42)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$2(NodeTestTask.java:180)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:74)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$1(NodeTestTask.java:166)
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:139)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$0(NodeTestTask.java:164)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:74)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:163)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:116)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1612)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:42)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$2(NodeTestTask.java:180)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:74)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$1(NodeTestTask.java:166)
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:139)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$0(NodeTestTask.java:164)
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:74)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:163)
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:116)
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.submit(SameThreadHierarchicalTestExecutorService.java:36)
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestExecutor.execute(HierarchicalTestExecutor.java:52)
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestEngine.execute(HierarchicalTestEngine.java:58)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.executeEngine(EngineExecutionOrchestrator.java:256)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.failOrExecuteEngine(EngineExecutionOrchestrator.java:228)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:189)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:109)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.lambda$execute$0(EngineExecutionOrchestrator.java:66)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.withInterceptedStreams(EngineExecutionOrchestrator.java:168)
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:65)
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:137)
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:126)
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:71)
+	at org.junit.platform.launcher.core.InterceptingLauncher.lambda$execute$2(InterceptingLauncher.java:66)
+	at org.junit.platform.launcher.core.ClasspathAlignmentCheckingLauncherInterceptor.intercept(ClasspathAlignmentCheckingLauncherInterceptor.java:25)
+	at org.junit.platform.launcher.core.InterceptingLauncher.execute(InterceptingLauncher.java:65)
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:71)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:104)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:565)
+	at org.apache.maven.surefire.api.util.ReflectionUtils.invokeMethodWithArray(ReflectionUtils.java:125)
+	at org.apache.maven.surefire.junitplatform.LauncherAdapter.executeWithCancellationToken(LauncherAdapter.java:68)
+	at org.apache.maven.surefire.junitplatform.LauncherAdapter.execute(LauncherAdapter.java:54)
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.execute(JUnitPlatformProvider.java:203)
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invokeAllTests(JUnitPlatformProvider.java:168)
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invoke(JUnitPlatformProvider.java:136)
+	at org.apache.maven.surefire.booter.ForkedBooter.runSuitesInProcess(ForkedBooter.java:385)
+	at org.apache.maven.surefire.booter.ForkedBooter.execute(ForkedBooter.java:162)
+	at org.apache.maven.surefire.booter.ForkedBooter.run(ForkedBooter.java:507)
+	at org.apache.maven.surefire.booter.ForkedBooter.main(ForkedBooter.java:495)
+Caused by: tools.jackson.core.exc.StreamReadException: Unexpected character ('n' (code 110)): was expecting double-quote to start property name
+ at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #UNKNOWN]
+	at tools.jackson.core.JsonParser._constructReadException(JsonParser.java:1856)
+	at tools.jackson.core.base.ParserMinimalBase._reportUnexpectedChar(ParserMinimalBase.java:1049)
+	at tools.jackson.core.json.ReaderBasedJsonParser._handleOddName(ReaderBasedJsonParser.java:1934)
+	at tools.jackson.core.json.ReaderBasedJsonParser.nextToken(ReaderBasedJsonParser.java:738)
+	at tools.jackson.databind.deser.bean.BeanDeserializer.deserialize(BeanDeserializer.java:196)
+	at tools.jackson.databind.deser.DeserializationContextExt.readRootValue(DeserializationContextExt.java:266)
+	at tools.jackson.databind.ObjectMapper._readMapAndClose(ObjectMapper.java:2639)
+	at tools.jackson.databind.ObjectMapper.readValue(ObjectMapper.java:1544)
+	at io.github.stoicswe.eyeandsickle.engine.save.JdbcSaveStore.parse(JdbcSaveStore.java:102)
+	... 96 more
+
+]]></system-err>
+  </testcase>
+  <testcase name="deleteIsScoped(Path)" classname="save slots" time="0.051">
+    <system-err><![CDATA[Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: opening character database at /var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-8762562335743335434/characters
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.FlywayExecutor info
+INFO: Database: jdbc:h2:file:/var/folders/vf/t3yg2qzs0m74kv990pv2pn4w0000gn/T/junit-8762562335743335434/characters (H2 2.3)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Schema history table "public"."flyway_schema_history" does not exist yet
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbValidate info
+INFO: Successfully validated 1 migration (execution time 00:00.000s)
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory info
+INFO: Creating Schema History table "public"."flyway_schema_history" ...
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Current version of schema "public": << Empty Schema >>
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Migrating schema "public" to version "7 - engine state"
+Aug 11, 2026 1:09:03 PM org.flywaydb.core.internal.command.DbMigrate info
+INFO: Successfully applied 1 migration to schema "public", now at version v7 (execution time 00:00.000s)
+Aug 11, 2026 1:09:03 PM io.github.stoicswe.eyeandsickle.engine.save.LocalDatabase migrate
+INFO: character database ready at schema version 7 (1 migration(s) applied)
+]]></system-err>
+  </testcase>
+  <testcase name="answerPersists(Path)" classname="the first-run familiarity question — CL-4 / T-2" time="0.003"/>
+  <testcase name="freshProfileIsUnasked(Path)" classname="the first-run familiarity question — CL-4 / T-2" time="0.0"/>
+  <testcase name="variantsAreDistinct" classname="themes" time="0.0"/>
+  <testcase name="roundingThemesAreOptIn" classname="themes" time="0.0"/>
+  <testcase name="overlaysAreColoursOnly" classname="themes" time="0.003"/>
+  <testcase name="everyStylesheetResolves" classname="themes" time="0.001"/>
+  <testcase name="highContrastIsSelectable" classname="themes" time="0.0"/>
+  <testcase name="deckHasNoOverlay" classname="themes" time="0.0"/>
+</testsuite>

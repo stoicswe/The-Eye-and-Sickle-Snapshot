@@ -1,0 +1,991 @@
+package io.github.stoicswe.eyeandsickle.engine.net;
+
+import io.github.stoicswe.eyeandsickle.engine.Balance;
+import io.github.stoicswe.eyeandsickle.engine.breach.Rng;
+import io.github.stoicswe.eyeandsickle.engine.state.GameSave;
+import io.github.stoicswe.eyeandsickle.engine.state.HostState;
+import io.github.stoicswe.eyeandsickle.engine.state.ServerState;
+import io.github.stoicswe.eyeandsickle.engine.state.TopologyState;
+import io.github.stoicswe.eyeandsickle.protocol.game.HostKind;
+import io.github.stoicswe.eyeandsickle.protocol.game.SignalStrength;
+import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * Builds the world once, from the save's seed, and never again.
+ *
+ * <h2>Shape: a depth-biased spanning tree over 5–7 servers, plus at most two depth-preserving chords</h2>
+ *
+ * The alternatives were considered and each fails for a specific reason. A <b>chain</b> gives one
+ * path and no choice; depth is forced rather than chosen, and a single unlucky bridge placement
+ * soft-locks the run. A <b>ring</b> makes depth from home ambiguous — two directions — and a seven-ring
+ * caps depth at three, so the "deeper is more dangerous" gradient has nowhere to go. A <b>full mesh or
+ * Erdős–Rényi graph</b> makes connectivity probabilistic, which turns "no server is unreachable" into a
+ * retry loop instead of a construction. A <b>tree plus chords</b> gives connectivity by construction —
+ * every server attaches to one already placed — an unambiguous depth, real branching so the player
+ * chooses which way to push, and enough extra edges that the result reads as a network rather than a
+ * taxonomy.
+ *
+ * <p>⚠ <b>The chord depth rule is load-bearing.</b> A chord between servers at depths {@code d} and
+ * {@code d+2} would shorten a BFS path and silently re-depth a server <em>after</em> its machines had
+ * already been generated against the old depth — a whole server one tier too hard or too soft, with
+ * nothing in the save to show it. Constraining chords to {@code |d(a) − d(b)| ≤ 1} makes BFS depth
+ * provably invariant under chord addition, and {@code TopologyGeneratorTest} checks that over ten
+ * thousand seeds rather than trusting the argument.
+ *
+ * <h2>⚠ The RNG contract: draw unconditionally, discard conditionally</h2>
+ *
+ * Every loop below draws a fixed number of values per iteration, whether or not the values are used.
+ * A conditional draw makes the stream's <em>shape</em> depend on the code path, and a replay from a
+ * stored seed then depends on the code as well as the seed — which is the one thing {@code Rng} exists
+ * to guarantee. So a host that is structurally a {@code GATEWAY} still rolls a kind and discards it;
+ * the chord pass draws for every unordered pair including adjacent ones; and step 4 spends one draw on
+ * nothing at all, reserving a slot so a future per-server property can be added without shifting every
+ * downstream host's stream. <b>Do not remove the padding draw.</b>
+ *
+ * <p>The total number of draws is therefore a pure function of {@code (nServers, hostCounts,
+ * edgeCount)}, each itself determined by earlier draws — so a fixed seed produces a byte-identical
+ * world, and {@code save.rngSeed} after generation is a fixed known value. Both are tested.
+ *
+ * <h2>Detection is decided here, once</h2>
+ *
+ * {@link HostState#detectRoll} is drawn during generation and never re-drawn. A sweep compares it
+ * against a threshold; it never rolls. That is what makes re-sweeping useless and save-scumming
+ * pointless <em>by construction</em> rather than by cooldown — see {@code NetRules} §the sweep, and
+ * {@code Rng}'s own javadoc for the same argument one level down.
+ *
+ * <h2>The home floor is a guarantee, not a tuning</h2>
+ *
+ * Step 8 runs after every roll and takes no draws. It is the fix for "discovery is unusable at the
+ * start": whatever the seed did, the player's rig ends up with at least five neighbours, at least
+ * three of which are tier-1, un-firewalled, undefended machines with {@code detectRoll = 0.0} — below
+ * the base sweep's worst threshold — and a payout floor. The first sweep a new character runs always
+ * returns at least three workable targets. Always, on every seed.
+ */
+public final class TopologyGenerator {
+
+    private TopologyGenerator() {}
+
+    /**
+     * Generates the world into {@code save.topology}.
+     *
+     * <p>Idempotent by guard: returns immediately when a topology already exists, because
+     * regenerating one would let a player reroll the world by any path that reached this method
+     * twice. Draws from {@code Rng.of(save)} and <b>commits before returning</b> — without the commit
+     * the save still holds the seed the draws started from and the entire world re-rolls on the next
+     * load, which is the single most expensive mistake available in this module.
+     *
+     * @param now the session clock, used for every timestamp written; never {@code Instant.now()}
+     */
+    public static void generate(GameSave save, Instant now) {
+        if (save == null || save.topology != null) {
+            return;
+        }
+        Rng rng = Rng.of(save);
+        TopologyState topology = new TopologyState();
+
+        // ── STEP 1: server count ───────────────────────────────────────────────────────── 1 draw
+        // ⚠ DRAWN UNCONDITIONALLY, then overridden. WorldRules.serverCount decides whether to use
+        // the roll — a draw whose existence depended on a setting would make the stream's shape
+        // depend on the setting and shift every value after it. Default path: bit-for-bit unchanged.
+        int rolledServers =
+                Balance.NET_SERVERS_MIN + rng.nextInt(Balance.NET_SERVERS_MAX - Balance.NET_SERVERS_MIN + 1);
+        int serverCount = io.github.stoicswe.eyeandsickle.engine.rules.WorldRules.serverCount(save, rolledServers);
+
+        // ── STEP 2: the spanning tree ──────────────────────────────── 3 draws per server after home
+        int[] depth = new int[serverCount];
+        boolean[][] treeEdge = new boolean[serverCount][serverCount];
+        for (int i = 1; i < serverCount; i++) {
+            // Recomputed each iteration, in ascending index order, from already-placed servers only.
+            // Deterministic and draw-free — it must be, or the parent choice below would consume a
+            // variable number of values.
+            List<Integer> deepest = deepestIndices(depth, i);
+
+            double mode = rng.nextDouble();
+            int deepPick = rng.nextInt(deepest.size());
+            int anyPick = rng.nextInt(i);
+
+            int parent = mode < Balance.NET_SERVER_DEEPEN_BIAS ? deepest.get(deepPick) : anyPick;
+            depth[i] = depth[parent] + 1;
+            treeEdge[parent][i] = true;
+            treeEdge[i][parent] = true;
+        }
+
+        // ── STEP 3: chords ───────────────────────── 1 draw per unordered pair, always, in order
+        //
+        // Adjacency is evaluated against the TREE ONLY, frozen before this loop starts, so the draw
+        // count is a pure function of serverCount rather than of which chords happened to be taken.
+        boolean[][] edge = copyOf(treeEdge);
+        int chords = 0;
+        for (int a = 0; a < serverCount; a++) {
+            for (int b = a + 1; b < serverCount; b++) {
+                double u = rng.nextDouble();
+                if (treeEdge[a][b]) {
+                    continue;
+                }
+                // The load-bearing constraint. See the class note: a depth-skipping chord re-depths a
+                // server after its machines were generated against the old depth.
+                if (Math.abs(depth[a] - depth[b]) > 1) {
+                    continue;
+                }
+                if (chords >= Balance.netServerChordMax(serverCount)) {
+                    continue;
+                }
+                if (u < io.github.stoicswe.eyeandsickle.engine.rules.WorldRules.crossLinkChance(save)) {
+                    edge[a][b] = true;
+                    edge[b][a] = true;
+                    chords++;
+                }
+            }
+        }
+
+        // ⚠ ONE TAKEN-NAME SET FOR THE WHOLE WORLD, hoisted above the server loop so servers and
+        // machines de-collide against each other as well as among themselves. The two pools cannot
+        // actually overlap — game characters against scientists — so this buys nothing today; what it
+        // buys is that adding a name to either pool can never quietly produce a server and a machine
+        // that read as the same thing.
+        java.util.Set<String> takenNames = new java.util.HashSet<>();
+
+        for (int s = 0; s < serverCount; s++) {
+            ServerState server = new ServerState();
+            server.serverId = HostArchetypes.serverId(s);
+            // ⚠ Hashed from the server id AND THE CHARACTER ID, NOT drawn — the same rule machine
+            // names follow, and for the same reason: this loop has no draw slot and adding one would
+            // re-roll every world.
+            //
+            // ⚠ THE CHARACTER ID IS NOT OPTIONAL SEASONING, it is the only per-world thing in the
+            // hash. `serverId` is `srv-<index>`, so without it every world named its home server
+            // `candid-noctilus` — see NpcNames.server.
+            server.name = NpcNames.server(save.characterId, server.serverId, takenNames);
+            takenNames.add(server.name);
+            server.depthFromHome = depth[s];
+            server.home = s == 0;
+            topology.servers.add(server);
+        }
+        topology.homeServerId = topology.servers.getFirst().serverId;
+        for (int a = 0; a < serverCount; a++) {
+            for (int b = 0; b < serverCount; b++) {
+                if (a != b && edge[a][b]) {
+                    topology.servers.get(a).peerServerIds.add(HostArchetypes.serverId(b));
+                }
+            }
+        }
+
+        // ── STEP 4: machines per server ──────────────── 1 + 1 + (n-1) + 2n draws for n machines
+        List<List<HostState>> grid = new ArrayList<>();
+        Map<String, HostState> byAddress = new HashMap<>();
+        // ⚠ Names take NO draws — see NpcNames. `takenNames` is declared above, with the servers,
+        // and is threaded across every server so the de-collision is global; it is filled in the
+        // generator's canonical order (server ascending, then host ascending) so the assignment is a
+        // pure function of the world's shape, like the draw counts around it.
+        for (int s = 0; s < serverCount; s++) {
+            int lo = Balance.netMachinesMin(depth[s]);
+            int hi = Balance.netMachinesMax(depth[s]);
+            int count = lo + rng.nextInt(hi - lo + 1);
+
+            // ⚠ THE RESERVED PADDING DRAW, SPENT AT LAST — and it was reserved for exactly this.
+            // Its note read: "it buys room for a future per-server property without shifting every
+            // downstream host's stream, which would otherwise re-roll the whole world for everyone
+            // the moment anything is added here". A server's NODE DEPTH is that property.
+            //
+            // ⚠ `nextInt(1)` and `nextDouble()` both call nextLong() exactly ONCE, so swapping them
+            // consumes the identical stream step and every draw after this one is untouched. That is
+            // the whole reason the slot was worth keeping empty for a year.
+            double uNodeDepth = rng.nextDouble();
+
+            // A no-op against the published table, kept because the brief's cap is a hard promise and
+            // a table edit is one line away from breaking it.
+            count = Math.min(count, Balance.NET_MACHINES_HARD_CAP);
+
+            String serverId = HostArchetypes.serverId(s);
+            List<HostState> hosts = new ArrayList<>(count);
+            for (int j = 0; j < count; j++) {
+                HostState host = new HostState();
+                host.address = address(s, j);
+                host.label = NpcNames.machine(save.characterId, host.address, takenNames);
+                takenNames.add(host.label);
+                host.serverId = serverId;
+                hosts.add(host);
+                byAddress.put(host.address, host);
+            }
+            // Exactly one gateway per server, always host index 0, always the lowest address on it.
+            hosts.getFirst().kind = HostKind.GATEWAY.name();
+
+            // ⚠ A SPINE, THEN BRANCHES — docs/design/18-network-topology.md §2.2. This used to be a
+            // random recursive tree (every host attached to a uniformly chosen predecessor), which is
+            // connected and cheap and gives a shape NOBODY CHOSE: depth about log(count), branch
+            // factor whatever fell out. docs/client/09 §8 measured the result and filed it as a
+            // defect — "layers are 1–5 machines wide, maps are 4–10 columns deep, fan-out does not
+            // occur at reachable depth". Depth and width are both decided here now.
+            //
+            // ⚠ THE DRAW COUNT IS UNCHANGED AT n − 1, and that is deliberate rather than lucky.
+            // Every machine after the gateway still consumes exactly one value; what changed is what
+            // the value MEANS — a spine machine spends it on nothing (its parent is structural) and a
+            // branch machine spends it choosing which already-placed host to hang off. Keeping the
+            // count identical is what lets NetTestKit.expectedDraws stay as it is and keeps this from
+            // re-rolling anything downstream of it in the stream.
+            // ⚠ The SETTING is applied to the rolled depth, then Balance.netNodeDepth clamps it
+            // against this server's own machine budget — so a player asking for 13 on a small server
+            // gets the deepest it can afford rather than a corridor with one fork at the end. The
+            // clamp is the same one a deep roll already gets; see WorldRules.serverDepth.
+            int[] nodeDepth = buildServerTree(
+                    hosts,
+                    Balance.netNodeDepth(
+                            count,
+                            uNodeDepth,
+                            io.github.stoicswe.eyeandsickle.engine.rules.WorldRules.of(save).serverDepth),
+                    rng);
+            // Then the extra links, which are what make a foothold open more than one direction.
+            //
+            // ⚠ DEPTH-PRESERVING, AND THIS IS THE SERVER-LEVEL CHORD RULE ONE LEVEL DOWN. The class
+            // note above explains why a chord between servers at depths d and d+2 is forbidden: it
+            // "would shorten a BFS path and silently re-depth a server AFTER its machines had already
+            // been generated against the old depth". Exactly the same thing is true of machines — an
+            // unconstrained chord from the gateway to a deep host collapses the spine this server's
+            // whole shape was built around, and nothing in the save would show it. The argument was
+            // already written down; it simply had nothing to apply to until the spine existed.
+            for (int j = 0; j < count; j++) {
+                double u = rng.nextDouble();
+                int v = rng.nextInt(count);
+                boolean wanted = u < Balance.NET_INTRA_CHORD_CHANCE;
+                // ⚠ THE SAME LAYER EXACTLY, not "within one". Depth preservation only needs |Δ| ≤ 1 —
+                // but a chord to the layer BELOW is indistinguishable from a branch in the finished
+                // graph, so allowing one makes NET_BRANCH_MAX unobservable in the thing that ships:
+                // measured, a host with a 7-wide fan and one such chord reads as fanning 8. A rule
+                // nobody can check on the real object is a rule that will drift.
+                boolean sameLayer = nodeDepth[j] == nodeDepth[v];
+                if (wanted && sameLayer && v != j && !hosts.get(j).links.contains(hosts.get(v).address)) {
+                    link(hosts.get(j), hosts.get(v));
+                }
+            }
+            grid.add(hosts);
+        }
+
+        // ── STEP 5: bridges ──────────────────────────────── 2 draws per server-graph edge, in order
+        for (int a = 0; a < serverCount; a++) {
+            for (int b = a + 1; b < serverCount; b++) {
+                if (!edge[a][b]) {
+                    continue;
+                }
+                List<HostState> left = grid.get(a);
+                List<HostState> right = grid.get(b);
+                int ia = rng.nextInt(left.size());
+                int ib = rng.nextInt(right.size());
+                // Never demote a gateway: a server with no gateway has no signpost, and the archetype
+                // table promises exactly one per server at index 0.
+                if (ia == 0) {
+                    ia = Math.min(1, left.size() - 1);
+                }
+                if (ib == 0) {
+                    ib = Math.min(1, right.size() - 1);
+                }
+                HostState from = left.get(ia);
+                HostState to = right.get(ib);
+                from.kind = HostKind.BRIDGE.name();
+                to.kind = HostKind.BRIDGE.name();
+                // ⚠ One host can be picked for two edges; the later assignment wins the ADVERTISED
+                // peer while both links survive. See HostState#bridgePeer — the consequence is
+                // cosmetic, because nothing routes on this field.
+                from.bridgePeer = to.address;
+                to.bridgePeer = from.address;
+                link(from, to);
+            }
+        }
+
+        // ── STEP 6: the player's rig ─────────────────────────────────────────────────── 0 draws
+        HostState rig = new HostState();
+        rig.address = topology.playerAddress;
+        rig.label = "localhost";
+        rig.serverId = topology.homeServerId;
+        rig.kind = HostKind.SELF.name();
+        rig.signal = HostArchetypes.baseSignal(rig.kind);
+        // Known from the first second and never a sweep candidate — both, so no code path can count
+        // the player's own machine as something they found.
+        rig.discovered = true;
+        rig.identified = true;
+        rig.foothold = true;
+        link(rig, grid.getFirst().getFirst());
+        byAddress.put(rig.address, rig);
+
+        // ── STEP 7: the per-host property block ─────── exactly 10 draws per host, canonical order
+        //
+        // Server index ascending, then host index ascending, every host, including the gateways and
+        // bridges whose kind is already fixed. The rig is not on this grid and takes no draws at all.
+        String[][] rolledKind = new String[serverCount][];
+        for (int s = 0; s < serverCount; s++) {
+            List<HostState> hosts = grid.get(s);
+            rolledKind[s] = new String[hosts.size()];
+            for (int j = 0; j < hosts.size(); j++) {
+                double uKind = rng.nextDouble();
+                double uTier = rng.nextDouble();
+                double uFw = rng.nextDouble();
+                double uTarpit = rng.nextDouble();
+                double uCanary = rng.nextDouble();
+                double uDefended = rng.nextDouble();
+                double uHoneypot = rng.nextDouble();
+                double uDoc = rng.nextDouble();
+                double detectRoll = rng.nextDouble();
+                double uLoot = rng.nextDouble();
+
+                HostState host = hosts.get(j);
+                int d = depth[s];
+
+                // Rolled for every host and kept only where structure has not already spoken. Held
+                // separately because the route floor may need to put a promoted bridge's predecessor
+                // back to what it would have been.
+                rolledKind[s][j] = Balance.netHostKind(d, uKind);
+                boolean structural = HostKind.GATEWAY.name().equals(host.kind)
+                        || HostKind.BRIDGE.name().equals(host.kind);
+                if (!structural) {
+                    host.kind = rolledKind[s][j];
+                }
+
+                host.tier = Balance.netTier(d, uTier);
+                if (HostArchetypes.infrastructure(host.kind)) {
+                    // "depth mean +1" — the two hosts a player must get through to make progress are
+                    // not also the softest things on their server.
+                    host.tier = Math.min(5, host.tier + 1);
+                }
+                host.firewallTier = Balance.netFirewallTier(d, uFw);
+                host.tarpit = uTarpit < Balance.netTarpitChance(d);
+                host.canaries = uCanary < Balance.netCanaryChance(d);
+
+                // ⚠ Ground truth only. NodeState.trafficAnalyzed and NodeState.honeypotSuspected are
+                // the Traffic Analyzer's and the Honeypot Detector's products; setting either here
+                // would hand out a gated tool's entire output, and with `defended` it would hand out
+                // proof-of-skill credit (Invariant I7).
+                host.defended = uDefended < Balance.netDefendedChance(d);
+                host.honeypot = uHoneypot < Balance.netHoneypotChance(d);
+
+                host.signal = HostArchetypes.baseSignal(host.kind);
+                host.detectRoll = detectRoll;
+
+                if (HostArchetypes.carriesDocuments(host.kind) && uDoc < Balance.netDocumentChance(d)) {
+                    host.documentId = DocumentPool.forAddress(host.address);
+                }
+                host.lootWei = HostArchetypes.carriesLoot(host.kind)
+                        ? Balance.netLootWei(host.tier, uLoot)
+                        : java.math.BigInteger.ZERO;
+            }
+        }
+
+        // ── STEP 8: the home floor ───────────────────────────────────────────────────── 0 draws
+        applyHomeFloor(grid.getFirst(), rig, byAddress, rolledKind[0], topology);
+
+        // ── STEP 9: bridge accounts ──────────────────────────────────────────────────── 0 draws
+        //
+        // ⚠ AFTER the home floor, and that ordering is load-bearing. `applyHomeFloor` may PROMOTE a
+        // nearer machine to a bridge and demote the one that rolled — `repointBridge` — so which
+        // hosts are bridges is not settled until it has run. Naming them before would leave the
+        // demoted machine holding a bridge's account and the promoted one holding an ordinary
+        // person's, which is the map advertising the wrong door.
+        nameBridgeOperators(grid, byAddress, topology);
+
+        topology.hosts.add(rig);
+        for (List<HostState> hosts : grid) {
+            topology.hosts.addAll(hosts);
+        }
+        topology.vantageAddress = rig.address;
+
+        // ⚠ MANDATORY. Without it the save still holds the seed the draws started from and the whole
+        // world re-rolls on the next load.
+        rng.commit(save);
+        save.topology = topology;
+    }
+
+    /**
+     * Gives every machine still carrying a pre-{@code NpcNames} label a generated one.
+     *
+     * <h2>⚠ This is a MIGRATION, and this repo does not otherwise have any</h2>
+     *
+     * {@code CLAUDE.md}'s standing rule is that no build has shipped, so nothing predates the current
+     * format and every reader of an older one has been deleted. This is a deliberate exception with a
+     * narrow justification: the world is generated <b>once</b> and {@link #generate} returns early
+     * ever after — that guard is what stops a player re-rolling their world — so a character created
+     * before 2026-08-07 would carry {@code home-relay-00} names <em>forever</em>, and the only
+     * alternative on offer is "delete your character". A name has no mechanical consequence, so
+     * rewriting one cannot change an outcome; that is what makes this safe where a rules migration
+     * would not be.
+     *
+     * <p>⚠ <b>Delete this the moment a build ships.</b> At that point the rule it is an exception to
+     * starts protecting real players' saves, and a relabelling pass that runs on every load is
+     * exactly the accumulated legacy machinery the rule exists to prevent.
+     *
+     * <h2>Why it is safe to run on every load</h2>
+     *
+     * Idempotent by construction rather than by a flag: after one pass every label satisfies
+     * {@link NpcNames#looksGenerated}, so the second pass finds nothing to do. There is no "migrated"
+     * marker to get out of step with the thing it describes.
+     *
+     * <p>⚠ <b>The rig is skipped explicitly.</b> Its label is {@code localhost}, which is not a
+     * generated name and never will be — without the guard the player's own machine would be renamed
+     * to something like {@code sultry-adleman}, which is the single most confusing outcome available
+     * here. Keyed on {@code SELF} rather than on the label, because a label is what is being rewritten.
+     *
+     * <p>⚠ <b>Already-recorded intelligence is rewritten too.</b> {@code NodeReportState.hostName} is
+     * write-once, so a machine breached before this ran has the old name pinned on its file — and
+     * write-once would then defend it against every future scan. The file is corrected in the same
+     * pass, and only where it holds a name this generator did not produce.
+     *
+     * @return whether anything changed
+     */
+    public static boolean relabelLegacy(GameSave save) {
+        if (save == null || save.topology == null) {
+            return false;
+        }
+        // ⚠ REBUILT FROM EMPTY, IN GENERATION ORDER, AND NOT SEEDED WITH WHAT IS ALREADY THERE
+        // (2026-08-10). This set used to be primed with every name that already looked generated, on
+        // the reasoning that a half-relabelled world must not hand out a name it is already using.
+        // That was right while the only names being replaced were from a scheme this class could
+        // recognise — and it is exactly wrong for an UNSALTED name, which is a perfectly valid member
+        // of the pool and would therefore be reserved against the very rename that has to replace it.
+        //
+        // Starting empty and walking the canonical order — every server, then every machine, server
+        // ascending and host ascending, which is the order `generate` uses and the order
+        // `topology.hosts` is stored in — lands on exactly the names `generate` would have produced
+        // for this character. That is what makes the pass idempotent by construction: it is a pure
+        // function of (characterId, world shape), so the second run computes the same answer and
+        // changes nothing.
+        java.util.Set<String> taken = new java.util.HashSet<>();
+
+        // ⚠ SERVERS TOO, as of 2026-08-08, and for the reason this method exists at all. Their names
+        // were a fixed list of seven — `home-relay`, `south-exchange` — the same on every seed and on
+        // every world, because the generation sequence has no draw slot for a server name. A
+        // character created before the pool landed would carry them FOREVER: `generate` returns early
+        // once a topology exists, which is the guard that stops a player re-rolling their world, so
+        // the only other remedy on offer is "delete your character".
+        //
+        // ⚠ AND THE POOL DID NOT ACTUALLY FIX THAT — the second remedy, 2026-08-10. The names became
+        // seven DIFFERENT fixed names: `NpcNames.server` hashed an id that is `srv-<index>` and holds
+        // nothing about the world, so every character alive called its home server `candid-noctilus`.
+        // Those names satisfy `looksLikeServer`, so the guard below could never have caught them —
+        // which is why this now recomputes and compares rather than asking whether a name is "one of
+        // ours". A world generated before the salt is indistinguishable from a current one by
+        // inspection; only the derivation can tell.
+        //
+        // ⚠ Safe on the same grounds as the machine half: a name has no mechanical consequence, so
+        // rewriting one cannot change an outcome.
+        boolean renamedServers = false;
+        for (ServerState server : save.topology.servers) {
+            String fresh = NpcNames.server(save.characterId, server.serverId, taken);
+            taken.add(fresh);
+            if (!fresh.equals(server.name)) {
+                server.name = fresh;
+                renamedServers = true;
+            }
+        }
+
+        // ⚠ BRIDGE ACCOUNTS TOO, on the same sanctioned exception: a name has no mechanical
+        // consequence, so rewriting one cannot change an outcome. Without this a character created
+        // before 2026-08-09 would have bridges running under ordinary operator names forever —
+        // `generate` returns early once a topology exists, which is the guard that stops a player
+        // re-rolling their world, so the only other remedy on offer is "delete your character".
+        //
+        // ⚠ It also CLEARS the account off anything that is no longer a bridge. A stale one would be
+        // a plain desktop advertising a server it does not reach, which is worse than an unnamed
+        // bridge: the first is a lie the map tells confidently, the second is a gap.
+        //
+        // ⚠ Idempotent by construction, not by a flag — it recomputes from the peer's server name
+        // every pass and lands on the same answer, so the second run changes nothing.
+        boolean namedBridges = false;
+        Map<String, HostState> byAddress = new HashMap<>();
+        for (HostState host : save.topology.hosts) {
+            byAddress.put(host.address, host);
+        }
+        Map<String, ServerState> serversById = new HashMap<>();
+        for (ServerState server : save.topology.servers) {
+            serversById.put(server.serverId, server);
+        }
+        for (HostState host : save.topology.hosts) {
+            String wanted = "";
+            if (HostKind.BRIDGE.name().equals(host.kind) && !host.bridgePeer.isEmpty()) {
+                HostState peer = byAddress.get(host.bridgePeer);
+                ServerState farSide = peer == null ? null : serversById.get(peer.serverId);
+                wanted = farSide == null ? "" : NpcNames.bridgeOperator(farSide.name);
+            }
+            if (!wanted.equals(host.operator == null ? "" : host.operator)) {
+                host.operator = wanted;
+                namedBridges = true;
+            }
+        }
+
+        // ⚠ EVERY MACHINE IS RECOMPUTED, not only the ones that fail `looksGenerated` — same reason
+        // as the servers above. An unsalted label is in the pool, so "is this one of mine" answers
+        // yes about a name every other world is also using. What decides now is whether the stored
+        // label is the one this character's world derives, which is the only question that can tell
+        // the two apart.
+        //
+        // ⚠ The rig is still skipped on SELF and never on its label. `localhost` is not a generated
+        // name and never will be; without the guard the player's own machine is renamed to something
+        // like `sultry-adleman`, which is the single most confusing outcome available here.
+        Map<String, String> renamed = new HashMap<>();
+        for (HostState host : save.topology.hosts) {
+            if (HostKind.SELF.name().equals(host.kind)) {
+                continue;
+            }
+            String fresh = NpcNames.machine(save.characterId, host.address, taken);
+            taken.add(fresh);
+            if (fresh.equals(host.label)) {
+                continue;
+            }
+            renamed.put(host.address, fresh);
+            host.label = fresh;
+        }
+        if (renamed.isEmpty()) {
+            return renamedServers || namedBridges;
+        }
+        if (save.nodeReports != null) {
+            for (var report : save.nodeReports) {
+                String fresh = renamed.get(report.address);
+                // ⚠ CORRECTED WHENEVER THE MACHINE WAS RENAMED, and the `looksGenerated` guard that
+                // used to stand here had to go with the salt (2026-08-10). `hostName` is write-once,
+                // so it defends whatever it holds against every future scan — and an unsalted name
+                // pinned on a file passes `looksGenerated` happily, which would have left the map
+                // saying one name and RECON another about the same machine, permanently. `renamed`
+                // already holds only the hosts whose label actually moved, so it is the whole test.
+                if (fresh != null) {
+                    report.hostName = fresh;
+                }
+            }
+        }
+        return true;
+    }
+
+    // ================================================================== the home floor (§1.7)
+
+    /**
+     * The anti-dead-end guarantee, applied deterministically after every roll.
+     *
+     * <p>Five steps, no draws, and each one closes a way a seed could hand a new player an unplayable
+     * opening. Together they are what makes the acceptance narrative true on <em>every</em> seed
+     * rather than on most of them, which is the difference between a guarantee and a tuning.
+     */
+    private static void applyHomeFloor(
+            List<HostState> homeHosts,
+            HostState rig,
+            Map<String, HostState> byAddress,
+            String[] rolledKind,
+            TopologyState topology) {
+
+        // 1. Clamp the whole home server. Home is where the game teaches, and a tier-2 firewall or a
+        //    tarpit on the first machine a player ever breaches teaches them that the breach is
+        //    unwinnable rather than that it is a puzzle.
+        for (HostState host : homeHosts) {
+            host.tier = Math.min(host.tier, 2);
+            host.firewallTier = Math.min(host.firewallTier, 1);
+            host.honeypot = false;
+            host.tarpit = false;
+            host.canaries = false;
+            host.documentId = "";
+        }
+
+        // 2. Contact floor. The three machines a new player is guaranteed to find on their first
+        //    sweep, forced to be workable: detectRoll 0.0 is below the base sweep's WORST threshold
+        //    (0.35 — a quiet machine at one hop), so they are found whatever the seed did.
+        //
+        //    ⚠ Gateways AND bridges are skipped, and the eligible hosts are LINKED to the rig rather
+        //    than selected from those that happen to be linked already. Two reasons, both of which
+        //    are bugs in the obvious version. The gateway is the lowest address on the server and
+        //    always one link from the rig, so "the first three at one link" would force the server's
+        //    only signpost into a TERMINAL — and the acceptance narrative shows the gateway found at
+        //    T2 alongside three T1 contacts. A bridge is worse: demoting one to a TERMINAL would
+        //    leave a cross-server link on a machine that no longer claims to have one, which the map
+        //    would render as a lie. Home has 12–20 machines and at most one gateway and three
+        //    bridges, so at least eight are always eligible.
+        //
+        //    ⚠ "Ascending address order" is INDEX order, not lexicographic string order: as strings,
+        //    "10.0.0.10" sorts before "10.0.0.2". Iterating the generated list is the correct reading
+        //    and the one that cannot silently drift.
+        List<HostState> contacts = new ArrayList<>();
+        for (HostState host : homeHosts) {
+            if (contacts.size() >= Balance.NET_HOME_GUARANTEED_CONTACTS) {
+                break;
+            }
+            if (HostKind.GATEWAY.name().equals(host.kind)
+                    || HostKind.BRIDGE.name().equals(host.kind)) {
+                continue;
+            }
+            contacts.add(host);
+            link(rig, host);
+            host.detectRoll = 0.0d;
+            host.kind = HostKind.TERMINAL.name();
+            host.signal = SignalStrength.MODERATE.name();
+            host.tier = 1;
+            host.firewallTier = 0;
+            host.defended = false;
+            host.looted = false;
+            host.bridgePeer = "";
+            host.lootWei = host.lootWei.max(Balance.NET_LOOT_FLOOR_WEI);
+        }
+
+        // 3. Neighbour floor. Whatever the intra-server tree did, the rig ends up one link from at
+        //    least five machines — enough that the base sweep has something to MISS as well as
+        //    something to find, which is what teaches that sensitivity is a purchase rather than a
+        //    formality. Applied after the contact floor so the three guaranteed contacts count
+        //    towards the five rather than being added on top of them.
+        for (int j = 1; j < homeHosts.size() && rig.links.size() < Balance.NET_HOME_SEED_NEIGHBOURS; j++) {
+            HostState candidate = homeHosts.get(j);
+            if (!rig.links.contains(candidate.address)) {
+                link(rig, candidate);
+            }
+        }
+
+        // 4. Route floor. A way out of home has to be within reach of the opening position, or a
+        //    player who has cleared their neighbourhood has nowhere to go and no way to see that they
+        //    have nowhere to go.
+        if (!hasNearbyBridge(homeHosts, rig, byAddress)) {
+            HostState promoted = promotionTarget(homeHosts, rig, byAddress, contacts);
+            HostState demoted = firstBridge(homeHosts);
+            if (promoted != null && demoted != null) {
+                repointBridge(demoted, promoted, byAddress, topology, rolledKind, homeHosts);
+            }
+        }
+
+        // 5. Counter-hack floor. Nothing to do here: Balance.netCounterHackChance(0) returns the named
+        //    constant NET_COUNTER_HACK_HOME, which is zero, and a test asserts the constant rather
+        //    than the table row. A player who has never left home is never counter-hacked.
+    }
+
+    /**
+     * Gives every bridge the account of the server on its far side — {@code design/18} §2.7.
+     *
+     * <h2>⚠ Zero draws, which is what makes it safe to add to a generator that already exists</h2>
+     *
+     * The name is read off the peer's server, which was named in step 3 from a hash of its id. No
+     * value is taken from the RNG, so every world generated before this existed re-generates
+     * identically and every world after it is unchanged in every other respect. Same rule the machine
+     * and server pools follow.
+     *
+     * <h2>⚠ SYMMETRIC — both ends of a bridge pair are named, each for the OTHER side</h2>
+     *
+     * A cross-server link has a bridge at each end, and each one is a door out of where it stands. So
+     * the home-side bridge runs under the far server's character and the far-side bridge runs under
+     * home's. Naming only the home end would leave the machine a player meets <em>after</em> crossing
+     * looking like an ordinary host, which is exactly when they most want to know they are standing on
+     * a door back.
+     *
+     * <p>A bridge whose peer cannot be resolved, or whose peer's server has a name from before the
+     * pool, keeps {@code ""} and falls back to the ordinary derivation — never a made-up account.
+     */
+    private static void nameBridgeOperators(
+            List<List<HostState>> grid, Map<String, HostState> byAddress, TopologyState topology) {
+        Map<String, ServerState> servers = new HashMap<>();
+        for (ServerState server : topology.servers) {
+            servers.put(server.serverId, server);
+        }
+        for (List<HostState> hosts : grid) {
+            for (HostState host : hosts) {
+                if (!HostKind.BRIDGE.name().equals(host.kind) || host.bridgePeer.isEmpty()) {
+                    continue;
+                }
+                HostState peer = byAddress.get(host.bridgePeer);
+                ServerState farSide = peer == null ? null : servers.get(peer.serverId);
+                host.operator = farSide == null ? "" : NpcNames.bridgeOperator(farSide.name);
+            }
+        }
+    }
+
+    /** Whether any bridge on home is within two links of the rig. */
+    private static boolean hasNearbyBridge(List<HostState> homeHosts, HostState rig, Map<String, HostState> byAddress) {
+        Map<String, Integer> hops = bfs(byAddress, rig.address);
+        for (HostState host : homeHosts) {
+            if (HostKind.BRIDGE.name().equals(host.kind) && hops.getOrDefault(host.address, Integer.MAX_VALUE) <= 2) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The nearest home host that may be promoted to a bridge: not the gateway, not one of the
+     * guaranteed contacts, and within two links.
+     *
+     * <p>⚠ The contacts are excluded because step 3 has already promised what they are — tier 1,
+     * {@code TERMINAL}, unfirewalled — and a promotion would overwrite two of those. The neighbour
+     * floor guarantees at least five hosts at one link, of which at most one is the gateway and three
+     * are contacts, so a candidate always exists at hop 1.
+     */
+    private static HostState promotionTarget(
+            List<HostState> homeHosts, HostState rig, Map<String, HostState> byAddress, List<HostState> contacts) {
+        Map<String, Integer> hops = bfs(byAddress, rig.address);
+        for (int wanted = 1; wanted <= 2; wanted++) {
+            for (HostState host : homeHosts) {
+                if (HostKind.GATEWAY.name().equals(host.kind) || contacts.contains(host)) {
+                    continue;
+                }
+                if (hops.getOrDefault(host.address, Integer.MAX_VALUE) == wanted) {
+                    return host;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static HostState firstBridge(List<HostState> homeHosts) {
+        for (HostState host : homeHosts) {
+            if (HostKind.BRIDGE.name().equals(host.kind)) {
+                return host;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Moves every cross-server link off {@code from} and onto {@code to}.
+     *
+     * <p>All of them, not just the advertised one. A host can be the endpoint of two server edges, and
+     * moving one while leaving the other would leave a demoted host still holding a link to another
+     * server — a cross-server edge on a machine that no longer claims to be a bridge, which is exactly
+     * the kind of quiet inconsistency the map would render as a lie.
+     */
+    private static void repointBridge(
+            HostState from,
+            HostState to,
+            Map<String, HostState> byAddress,
+            TopologyState topology,
+            String[] rolledKind,
+            List<HostState> homeHosts) {
+
+        String homeServerId = topology.homeServerId;
+        List<String> crossServer = new ArrayList<>();
+        for (String address : from.links) {
+            HostState peer = byAddress.get(address);
+            if (peer != null && !homeServerId.equals(peer.serverId)) {
+                crossServer.add(address);
+            }
+        }
+        if (crossServer.isEmpty()) {
+            return;
+        }
+        for (String address : crossServer) {
+            HostState peer = byAddress.get(address);
+            unlink(from, peer);
+            link(to, peer);
+            peer.bridgePeer = to.address;
+        }
+        from.bridgePeer = "";
+        // Put the demoted host back to the kind it originally rolled, so a promotion does not also
+        // quietly change the archetype mix of the home server.
+        int index = homeHosts.indexOf(from);
+        String restored = index >= 0 && index < rolledKind.length && rolledKind[index] != null
+                ? rolledKind[index]
+                : HostKind.TERMINAL.name();
+        from.kind = restored;
+        from.signal = HostArchetypes.baseSignal(from.kind);
+
+        to.kind = HostKind.BRIDGE.name();
+        to.bridgePeer = crossServer.getFirst();
+        to.signal = HostArchetypes.baseSignal(to.kind);
+        // Infrastructure sits a tier above its neighbours, then the home clamp applies again.
+        to.tier = Math.min(2, to.tier + 1);
+    }
+
+    // ================================================================== small helpers
+
+    /**
+     * Hop distance from {@code from} over every link, ignoring discovery.
+     *
+     * <p>Undiscovered machines still conduct. A host the player has never seen is still the reason a
+     * further one is two hops away rather than three, and a BFS over the discovered subgraph would
+     * make the hop ceiling widen as the player learned things — which would be reach for free.
+     */
+    static Map<String, Integer> bfs(Map<String, HostState> byAddress, String from) {
+        Map<String, Integer> hops = new HashMap<>();
+        HostState start = byAddress.get(from);
+        if (start == null) {
+            return hops;
+        }
+        hops.put(from, 0);
+        Deque<String> queue = new ArrayDeque<>();
+        queue.add(from);
+        while (!queue.isEmpty()) {
+            String at = queue.removeFirst();
+            int next = hops.get(at) + 1;
+            HostState host = byAddress.get(at);
+            if (host == null) {
+                continue;
+            }
+            for (String neighbour : host.links) {
+                if (byAddress.containsKey(neighbour) && !hops.containsKey(neighbour)) {
+                    hops.put(neighbour, next);
+                    queue.addLast(neighbour);
+                }
+            }
+        }
+        return hops;
+    }
+
+    /**
+     * {@code 10.<server>.<index/254>.<2 + index%254>}.
+     *
+     * <p>Home's gateway is therefore {@code 10.0.0.2} and the player's rig is {@code 10.0.0.1}, one
+     * link away — an ordinary private-range neighbourhood, which is what the address scheme is for.
+     * The third octet exists so the scheme survives a machine cap larger than 253 without changing
+     * shape; at the published cap of fifty it is always zero.
+     */
+    static String address(int server, int index) {
+        return String.format(Locale.ROOT, "10.%d.%d.%d", server, index / 254, 2 + (index % 254));
+    }
+
+    /**
+     * One server's internal tree: a spine of the chosen depth, then branches hung off it.
+     *
+     * <h2>⚠ WHAT THIS REPLACED, and why the old shape was a defect rather than a simplification</h2>
+     *
+     * Every host used to attach to a uniformly chosen already-placed host — a <b>random recursive
+     * tree</b>. That is connected by construction, costs one draw per host, and produces a shape
+     * <em>nobody chose</em>: expected depth about {@code log(count)}, and a branch factor that is
+     * whatever the uniform parent choice happens to give. {@code docs/client/09} §8 measured the
+     * consequence over seven generated worlds and filed it: <b>"layers are 1–5 machines wide, maps
+     * are 4–10 columns deep… fan-out does not occur at reachable depth"</b>. The map's stack fold was
+     * built for a fan-out the generator was never going to produce.
+     *
+     * <h2>The construction — {@code docs/design/18-network-topology.md} §2</h2>
+     *
+     * <ol>
+     *   <li>A <b>spine</b> of {@code depth} machines from the gateway, which is what makes the depth
+     *       exact rather than emergent.
+     *   <li>Every remaining machine hangs off an already-placed host that still has room and is not
+     *       already at the depth limit.
+     *   <li>The first two surplus machines are forced onto <b>two different</b> spine hosts, so
+     *       {@code NET_MIN_BRANCHING_NODES} is a guarantee rather than a probability.
+     * </ol>
+     *
+     * <h2>⚠ EXACTLY {@code n − 1} DRAWS, one per host after the gateway, unconditionally</h2>
+     *
+     * The same count the random recursive tree took, so nothing downstream in the stream moves. A
+     * spine host consumes its draw and discards it — its parent is structural — which is this
+     * generator's standing "draw unconditionally, discard conditionally" rule and the reason a replay
+     * from a stored seed depends on the seed rather than on the code path.
+     *
+     * <h2>⚠ Branch capacity is HASHED, not drawn, for the same reason</h2>
+     *
+     * A per-host width draw would be a second value per host and would shift every host's property
+     * block downstream of it — re-rolling every existing world. {@code AddressHash} is fixed before
+     * the player arrives and cannot give two answers, which is the property the whole discovery
+     * system already rests on.
+     *
+     * @param depth the node depth this server was assigned, already clamped to its budget
+     * @return each host's depth from the gateway, which the chord pass needs to stay depth-preserving
+     */
+    private static int[] buildServerTree(List<HostState> hosts, int depth, Rng rng) {
+        int count = hosts.size();
+        int[] hostDepth = new int[count];
+        int[] children = new int[count];
+        int[] capacity = new int[count];
+        for (int j = 0; j < count; j++) {
+            capacity[j] = Balance.netBranchWidth(AddressHash.unitOf(hosts.get(j).address, "branch-width"));
+        }
+
+        // The spine. Host 0 is the gateway and is the root at depth 0.
+        int spine = Math.min(depth, count - 1);
+        for (int j = 1; j <= spine; j++) {
+            rng.nextInt(count); // consumed and discarded — the parent here is structural
+            attach(hosts, hostDepth, children, j, j - 1);
+        }
+
+        // ⚠ The two forced forks. Without them a server whose surplus all landed on one host would be
+        // a chain with a tail, which is the shape rule 3 exists to forbid — and "usually not a chain"
+        // is not a guarantee. They take their draw like everything else and ignore it.
+        int forced = 0;
+        for (int j = spine + 1; j < count && forced < Balance.NET_MIN_BRANCHING_NODES; j++) {
+            rng.nextInt(count);
+            // Two DIFFERENT spine hosts, each of which already has its spine child, so each becomes a
+            // real fork. Walking from the deep end keeps the forks away from the gateway, where a
+            // fan is least interesting because the player has not travelled to reach it.
+            int onto = Math.max(0, spine - 1 - forced);
+            attach(hosts, hostDepth, children, j, onto);
+            forced++;
+        }
+
+        for (int j = spine + 1 + forced; j < count; j++) {
+            int pick = rng.nextInt(count);
+            attach(hosts, hostDepth, children, j, parentFor(hostDepth, children, capacity, depth, j, pick));
+        }
+        return hostDepth;
+    }
+
+    /**
+     * Which already-placed host a branch machine hangs off.
+     *
+     * <p>⚠ <b>The fallback is not decoration.</b> Capacities are hashed, so a server whose hosts all
+     * hashed to 1 and spent it on the spine would have no eligible parent at all — vanishingly
+     * unlikely and perfectly possible, and a generator that threw there would be a world that cannot
+     * be created from some seeds. It falls back to the shallowest host with room in the depth budget,
+     * which is always the gateway at worst.
+     */
+    private static int parentFor(int[] hostDepth, int[] children, int[] capacity, int depth, int placed, int pick) {
+        List<Integer> eligible = new ArrayList<>();
+        for (int p = 0; p < placed; p++) {
+            if (hostDepth[p] < depth && children[p] < capacity[p]) {
+                eligible.add(p);
+            }
+        }
+        if (!eligible.isEmpty()) {
+            return eligible.get(pick % eligible.size());
+        }
+        int shallowest = 0;
+        for (int p = 0; p < placed; p++) {
+            if (hostDepth[p] < depth && hostDepth[p] < hostDepth[shallowest]) {
+                shallowest = p;
+            }
+        }
+        return shallowest;
+    }
+
+    private static void attach(List<HostState> hosts, int[] hostDepth, int[] children, int child, int parent) {
+        hostDepth[child] = hostDepth[parent] + 1;
+        children[parent]++;
+        link(hosts.get(child), hosts.get(parent));
+    }
+
+    /** Symmetric, and idempotent — the generator writes both sides and never writes one twice. */
+    private static void link(HostState a, HostState b) {
+        if (a == null || b == null || a == b) {
+            return;
+        }
+        if (!a.links.contains(b.address)) {
+            a.links.add(b.address);
+        }
+        if (!b.links.contains(a.address)) {
+            b.links.add(a.address);
+        }
+    }
+
+    private static void unlink(HostState a, HostState b) {
+        if (a == null || b == null) {
+            return;
+        }
+        a.links.remove(b.address);
+        b.links.remove(a.address);
+    }
+
+    /** Indices {@code 0..limit-1} whose depth is maximal, ascending. Never empty for {@code limit ≥ 1}. */
+    private static List<Integer> deepestIndices(int[] depth, int limit) {
+        int max = 0;
+        for (int i = 0; i < limit; i++) {
+            max = Math.max(max, depth[i]);
+        }
+        List<Integer> out = new ArrayList<>();
+        for (int i = 0; i < limit; i++) {
+            if (depth[i] == max) {
+                out.add(i);
+            }
+        }
+        return out;
+    }
+
+    private static boolean[][] copyOf(boolean[][] source) {
+        boolean[][] out = new boolean[source.length][];
+        for (int i = 0; i < source.length; i++) {
+            out[i] = source[i].clone();
+        }
+        return out;
+    }
+}

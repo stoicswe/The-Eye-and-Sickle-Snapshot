@@ -1,0 +1,448 @@
+package io.github.stoicswe.eyeandsickle.protocol.game;
+
+/**
+ * One machine as the player knows it.
+ *
+ * <p>The name is chosen over {@code Node} or {@code Host} on purpose: this is not a machine, it is a
+ * <em>report</em> of one. Everything on it is knowledge the player has paid for — with a sweep, with a
+ * recon tool, or with a breach — and the discipline the whole network view rests on is that there is no
+ * field here the truth could hide in. {@link BreachTarget} carries the same warning for the same reason,
+ * and this record and that one are the two halves of "what recon has established": this one describes
+ * where a machine sits, that one describes whether to open a breach on it.
+ *
+ * <h2>Undiscovered machines have no {@code Sighting}, and that is the encoding</h2>
+ *
+ * There is deliberately no {@code discovered} flag, and no dark or placeholder instance. A machine the
+ * player has not detected is simply absent from {@link NetMap#sightings()} — the shell does not list it,
+ * completion does not offer it, {@code Targets} produces no {@link BreachTarget} for it, and the graph
+ * draws no cell where it is: no marker, no ellipsis, no "3 contacts nearby". Absence is the only encoding
+ * of "not discovered" that cannot leak, because there is nothing to leak <em>from</em>. A boolean would
+ * have put the machine's address, server and hop count on the wire and asked every renderer, forever, to
+ * remember not to draw them.
+ *
+ * <p>{@link #kind} being {@link HostKind#UNKNOWN} is the <em>other</em> thing, and the two are worth
+ * keeping straight: that is a machine the sweep did find, whose type the sweep is not licensed to name.
+ * "Something is there and I do not know what" is honest and drawable; upgrading it to a named type is
+ * what the 15 EC Passive Sniffer sells ({@code docs/design/07-recon-tools.md} §1).
+ *
+ * <h2>What is missing from this record, and why each absence is load-bearing</h2>
+ *
+ * <ul>
+ *   <li><strong>No {@code defended}, no {@code firewallTier}, no loot figure.</strong> Those reach the
+ *       player through {@link BreachTarget}, which already documents them as recon output rather than
+ *       truth. Duplicating them here would give the same question two answers on the same screen, and
+ *       the two would drift — the interesting half of {@code liveOrDormant} is that it reads
+ *       {@link TargetState#DORMANT} both for a dormant machine and for one nobody has analysed, and a
+ *       second copy would eventually be built without that subtlety.
+ *   <li><strong>No detection roll.</strong> Whether a sweep finds a machine is decided by a value fixed
+ *       when the world is generated and compared against the instrument's sensitivity; putting it on the
+ *       wire would let a client compute exactly what a better sweep would find, which is the purchase
+ *       decision the upgraded sweeps exist to sell. It is also the reason re-running the same sweep is
+ *       not a re-roll, and a client that could see the number would be a client that could prove it.
+ *   <li><strong>No {@code honeypot}.</strong> {@link #honeypotSuspected} is a suspicion and is named as
+ *       one. {@code docs/design/07-recon-tools.md} §2 requires the Honeypot Detector to keep a
+ *       false-negative rate — "a perfect detector removes the fear the traps exist to create" — so a
+ *       truthful boolean would delete a schematic-gated item at the point of rendering. Same discipline
+ *       as {@link BreachTarget#honeypotSuspected()}; the name carries the uncertainty so nobody later
+ *       "cleans it up".
+ * </ul>
+ *
+ * <h2>{@code hopsFromVantage}, not hops from the rig</h2>
+ *
+ * Distance is measured from wherever the player is currently operating, which is what makes a one-hop
+ * horizon survivable across a whole world: traversal is repositioning. Breach a machine, take a foothold,
+ * connect to it, and everything is renumbered from there. A player who cannot afford reach can walk to
+ * it instead, and the same machine that was out of range at two hops is at one hop from the foothold next
+ * to it. Reach is bought only with a schematic (Invariant I2); position is bought with skill.
+ *
+ * @param address where the machine is, and the join key everything else about it hangs off
+ * @param label what to call it on screen
+ * @param serverId which {@link ServerRef} it sits on
+ * @param kind what it is, once a type-revealing tool has run; {@link HostKind#UNKNOWN} until then, which
+ *     is the state a sweep alone leaves every machine in
+ * @param tier how hard it is expected to be, on the one shared scale; {@code null} when there is none to
+ *     state — the player's own rig has no difficulty, and neither has a machine whose tier recon has not
+ *     established
+ * @param signal how loud it is — one of the two inputs to whether a sweep finds it, the other being the
+ *     instrument
+ * @param hopsFromVantage distance from where the player is operating right now, not from their rig;
+ *     {@code 0} for the vantage itself
+ * @param vantage whether this is where the player is operating from
+ * @param foothold whether the player has breached it and may {@code connect} to it
+ * @param looted whether its one-time payout has already been taken — loot is a stock, not a flow
+ * @param honeypotSuspected whether this looks like a trap; a suspicion, never a finding
+ * @param hostsDeployedMiner whether a miner is known to be running on it
+ * @param documentAvailable whether there is something here worth reading and the player has not taken it
+ * @param bridgePeerServerName the <em>server</em> on the far side of a bridge; {@code ""} otherwise. Never
+ *     an address, never a host count — a bridge's published function is to name the network on the other
+ *     side, and anything past that is the far side's topology crossing a boundary it must not cross
+ */
+public record Sighting(
+        String address,
+        String label,
+        String serverId,
+        HostKind kind,
+        DifficultyTier tier,
+        SignalStrength signal,
+        /**
+         * Hop distance from the player's <b>own rig</b>, over the full link graph.
+         *
+         * <h2>⚠ THIS IS THE MAP'S FRAME; {@link #hopsFromVantage()} IS THE SWEEP'S REACH</h2>
+         *
+         * The network map lays its columns out on this one, so <b>layer 0 is always the rig</b> and
+         * the picture a player has built up does not move when they reposition. Moving the vantage
+         * used to re-root the whole graph: the machine you connected to jumped to the leftmost column
+         * and your own rig slid rightwards among strangers, which reads as the world having been
+         * rearranged rather than as you having moved through it.
+         *
+         * <p>What repositioning should look like is a <b>branch growing rightward</b> from the node
+         * you moved to — and that falls out of this automatically, because anything a sweep finds
+         * from the new vantage sits one hop further from the rig than the vantage does.
+         *
+         * <p>⚠ Both distances are published because both are real and neither derives the other.
+         * "How far is this from me" frames the drawing; "how far is this from where I am operating"
+         * is what the hop ceiling is measured in, and it is the number the list's HOPS column and
+         * every screen-reader line quote.
+         */
+        int hopsFromRig,
+        int hopsFromVantage,
+        /**
+         * Whether this is the player's <b>own rig</b>.
+         *
+         * <h2>⚠ NOT {@link #vantage()}, AND THE TWO WERE CONFLATED IN FIVE PLACES</h2>
+         *
+         * The rules have always computed this — {@code NetRules.sighting} opens with
+         * {@code host.address.equals(topology.playerAddress)} — and never published it, so every
+         * view needing "is this mine" reached for {@code vantage}, the only adjacent flag there was.
+         * That is correct exactly while the vantage has never moved, and wrong the moment it does:
+         * the player's own rig stops being "self" and somebody else's machine starts being it.
+         *
+         * <p><b>{@code self} is whose machine this is; {@code vantage} is where the next sweep
+         * measures from.</b> Moving the vantage changes only the second, and nothing else.
+         */
+        boolean self,
+        boolean vantage,
+        boolean foothold,
+        /**
+         * Breached once, and shut out since — the host has been patched.
+         *
+         * <p>⚠ Distinct from {@code !foothold}, which is "never breached". A patched host is one the
+         * player <em>did</em> get into and cannot any more, which is a different fact and a
+         * different decision: the route it opened is closed, the intelligence it gave is stale, and
+         * breaching it again is a known quantity rather than a gamble.
+         *
+         * <p>⚠ <b>Nothing sets this true yet.</b> No rule patches a host — see
+         * {@code docs/design/15-open-questions.md}, where the mechanic is proposed rather than
+         * decided. The field and its rendering exist so the state has one meaning the day it does,
+         * rather than being invented twice in two places.
+         */
+        boolean patched,
+        boolean looted,
+        boolean honeypotSuspected,
+        boolean hostsDeployedMiner,
+        boolean documentAvailable,
+        String bridgePeerServerName,
+        /**
+         * Whether a scan has ever come back from this machine — what the list's {@code [i]} marks.
+         *
+         * <p>⚠ "There is a file", not "the file is complete". A machine scanned once for its firewall
+         * and a machine taken apart down to its vault both carry the marker, because the marker's job
+         * is to say <em>there is something to open</em>. How much is in it is the report's own first
+         * line, which is the right place for it — a marker that tried to carry completeness would need
+         * seven states and would be read as none of them.
+         */
+        boolean reported,
+        /**
+         * The account that runs this machine, or {@code ""} until it has been established.
+         *
+         * <h2>⚠ Both this and {@code label} are FINDINGS, not facts about the world</h2>
+         *
+         * They are {@code PortScanTarget.IDENTITY}'s product — the cheapest rung on the ladder — or
+         * they come from having breached the machine, where the name and the account are simply in
+         * the prompt. Until one of those has happened both are empty and the map shows the address
+         * alone.
+         *
+         * <p>⚠ <b>{@code label} used to be ground truth</b>, copied straight off the host by the
+         * sweep, so every machine on the map arrived already named. That made the identity rung
+         * unsellable and it made a name something the player never had to work for. The two fields
+         * sit together here so it is obvious they are gated together.
+         */
+        String operatorName,
+        /**
+         * Whether a NET_MAN is running on this bridge — i.e. whether the crossing is open.
+         *
+         * <h2>⚠ Published, and it is not a leak</h2>
+         *
+         * It says something about a machine the player has <b>breached</b> and about their own
+         * software running on it. It names nothing on the far side: not an address, not a count, not
+         * a kind. The far server's name was already published by the bridge itself, which is a
+         * bridge's entire advertised function.
+         *
+         * <p>False on everything that is not a bridge, forever.
+         */
+        boolean crossingOpen,
+        /**
+         * Whether a deep survey has been taken from this bridge, and the rough count it produced.
+         *
+         * <p>{@code peerEstimate} is {@code -1} until then. ⚠ The two numbers travel together and
+         * must be rendered together — an estimate shown without its accuracy reads as a count, and a
+         * player who later crosses and finds a different number concludes the map lied rather than
+         * that they were given a band.
+         */
+        boolean surveyed,
+        int peerEstimate,
+        int peerAccuracyPercent,
+        /**
+         * Roughly how many machines are attached to this one, or {@code -1} for "nothing to say".
+         *
+         * <h2>⚠ IT IS PUBLISHED ONLY WHILE THERE IS SOMETHING LEFT TO FIND</h2>
+         *
+         * {@code -1} means one of two things and the interface must treat them identically: the
+         * machine has no connections the player has not already discovered, or nothing has estimated
+         * it. Both read as "no more here", which is the honest answer for both. <b>The suppression
+         * lives in the rules, not in the renderer</b> — a client that decided for itself when to hide
+         * the figure would be a second place that knows what the player has found.
+         *
+         * <p>So the map draws a tag only when this is set, and its disappearance is the signal: once
+         * every connection is on screen, the tag goes and the lines say the rest. That is the whole
+         * feature — it answers "is another sweep from here worth the cycles?" without answering
+         * "what would it find?".
+         *
+         * <h2>⚠ Why this clears the bar the rest of this record is held to</h2>
+         *
+         * It is a claim about machines the player has <b>not</b> discovered, which {@code NetRules}
+         * otherwise refuses outright, and {@code design/18} §2.7c specifically refuses to publish a
+         * server's completion metric on those grounds. What makes this the licensed shape is the
+         * argument {@code SweepReport#inRange} already stands on: it is the <b>instrument's own
+         * sensitivity</b>. It carries no address, no type, no tier and no value — a sweep is allowed
+         * to say it heard something it could not resolve, and is not allowed to say what.
+         *
+         * <p>⚠ It is also deliberately <b>wrong</b>, by up to {@code 100 -
+         * Balance.NET_LINK_ESTIMATE_ACCURACY_PERCENT} — hashed from the address so it is the same
+         * wrong number forever, because re-sweeping is not a reroll and an estimate that moved when
+         * asked twice would be a free way to triangulate the truth.
+         *
+         * <p>⚠ <b>Cross-server links are excluded from it entirely.</b> What is on the far side of a
+         * bridge is {@code peerEstimate}'s question, and it is bought separately and dearly — a DEEP
+         * survey taken from a foothold on the bridge. Counting the crossing here would answer it for
+         * free, in a number the player did not pay for, and give two figures for one question.
+         *
+         * <p>⚠ <b>It is never less than the count already drawn.</b> A machine showing four links and
+         * a tag reading "about 3" reads as a broken instrument rather than as a band, so the estimate
+         * is floored above what the player can already see. That is a correction toward the truth,
+         * not away from it: the figure is only published when a real connection is still missing.
+         */
+        int linkEstimate) {
+
+    /**
+     * The reading without a crossing state — every producer and fixture that predates crossings.
+     *
+     * <h2>⚠ Same reasoning as the two overloads below, and the same defaults rule</h2>
+     *
+     * The four crossing fields arrived on 2026-08-09 for a mechanic that only bridges take part in.
+     * Threading {@code false, false, -1, 0} through every fixture to say "this is not a bridge and
+     * nobody has surveyed it" would be noise at every call site, and the reader of each would have to
+     * work out which boolean was which.
+     *
+     * <p>⚠ The defaults are the <b>true</b> values rather than merely the safe ones: a machine nobody
+     * has opened a crossing on has none, and {@code -1} is "never looked" — deliberately not zero,
+     * which is a legitimate answer about a very small server.
+     */
+    public Sighting(
+            String address,
+            String label,
+            String serverId,
+            HostKind kind,
+            DifficultyTier tier,
+            SignalStrength signal,
+            int hopsFromRig,
+            int hopsFromVantage,
+            boolean self,
+            boolean vantage,
+            boolean foothold,
+            boolean patched,
+            boolean looted,
+            boolean honeypotSuspected,
+            boolean hostsDeployedMiner,
+            boolean documentAvailable,
+            String bridgePeerServerName,
+            boolean reported,
+            String operatorName) {
+        this(
+                address,
+                label,
+                serverId,
+                kind,
+                tier,
+                signal,
+                hopsFromRig,
+                hopsFromVantage,
+                self,
+                vantage,
+                foothold,
+                patched,
+                looted,
+                honeypotSuspected,
+                hostsDeployedMiner,
+                documentAvailable,
+                bridgePeerServerName,
+                reported,
+                operatorName,
+                false,
+                false,
+                -1,
+                0,
+                -1);
+    }
+
+    /**
+     * The reading without a patch state — every producer that has one today.
+     *
+     * <h2>⚠ A convenience constructor, and a deliberate one</h2>
+     *
+     * {@link #patched} was added on 2026-07-27 for a mechanic that <b>does not exist yet</b>: nothing
+     * in the engine patches a host. Threading a literal {@code false} through every producer and
+     * every fixture to say "no rule has run" would be noise at fourteen call sites, and the reader
+     * of each one would have to work out which boolean it was.
+     *
+     * <p>⚠ It defaults to {@code false}, which is not merely the safe value — it is the <b>true</b>
+     * one. A host nobody has locked the player out of is not patched, and the day something can
+     * patch one, that producer uses the canonical constructor and this keeps meaning what it says.
+     */
+    public Sighting(
+            String address,
+            String label,
+            String serverId,
+            HostKind kind,
+            DifficultyTier tier,
+            SignalStrength signal,
+            int hopsFromVantage,
+            boolean vantage,
+            boolean foothold,
+            boolean looted,
+            boolean honeypotSuspected,
+            boolean hostsDeployedMiner,
+            boolean documentAvailable,
+            String bridgePeerServerName) {
+        this(
+                address,
+                label,
+                serverId,
+                kind,
+                tier,
+                signal,
+                // ⚠ Both distances take the one the caller gave. These convenience constructors are
+                // for fixtures and tests, where the vantage has not moved and the two are equal by
+                // definition — the rules' own producer passes them separately.
+                hopsFromVantage,
+                hopsFromVantage,
+                // ⚠ self=false. These convenience constructors describe "the state a sweep alone
+                // leaves a machine in", and a machine a sweep found is by definition not your rig.
+                false,
+                vantage,
+                foothold,
+                false,
+                looted,
+                honeypotSuspected,
+                hostsDeployedMiner,
+                documentAvailable,
+                bridgePeerServerName,
+                false,
+                "",
+                // ⚠ A crossing nobody has opened, never surveyed, no estimate. Same reasoning as
+                // `patched` above: these constructors describe the state a sweep alone leaves a
+                // machine in, and -1 is "never looked" rather than "nothing over there".
+                false,
+                false,
+                -1,
+                0,
+                -1);
+    }
+
+    /**
+     * The reading without a report flag — every fixture and test that has no scan behind it.
+     *
+     * <p>Same reasoning as the overload above: {@code reported} was added on 2026-07-29 and a literal
+     * {@code false} threaded through every producer would be noise the reader of each call site has to
+     * decode. It defaults to the true value — a machine nobody has scanned has no file.
+     */
+    public Sighting(
+            String address,
+            String label,
+            String serverId,
+            HostKind kind,
+            DifficultyTier tier,
+            SignalStrength signal,
+            int hopsFromVantage,
+            boolean vantage,
+            boolean foothold,
+            boolean patched,
+            boolean looted,
+            boolean honeypotSuspected,
+            boolean hostsDeployedMiner,
+            boolean documentAvailable,
+            String bridgePeerServerName) {
+        this(
+                address,
+                label,
+                serverId,
+                kind,
+                tier,
+                signal,
+                // ⚠ Both distances take the one the caller gave. These convenience constructors are
+                // for fixtures and tests, where the vantage has not moved and the two are equal by
+                // definition — the rules' own producer passes them separately.
+                hopsFromVantage,
+                hopsFromVantage,
+                // ⚠ self=false. These convenience constructors describe "the state a sweep alone
+                // leaves a machine in", and a machine a sweep found is by definition not your rig.
+                false,
+                vantage,
+                foothold,
+                patched,
+                looted,
+                honeypotSuspected,
+                hostsDeployedMiner,
+                documentAvailable,
+                bridgePeerServerName,
+                false,
+                "",
+                // ⚠ A crossing nobody has opened, never surveyed, no estimate. Same reasoning as
+                // `patched` above: these constructors describe the state a sweep alone leaves a
+                // machine in, and -1 is "never looked" rather than "nothing over there".
+                false,
+                false,
+                -1,
+                0,
+                -1);
+    }
+
+    public Sighting {
+        address = address == null ? "" : address;
+        label = label == null ? "" : label;
+        serverId = serverId == null ? "" : serverId;
+
+        // UNKNOWN and LOW are the readings that claim least, so they are what a producer that said
+        // nothing gets. Defaulting kind to anything else would invent a type the player never bought,
+        // and defaulting signal upward would make an unstated machine look easier to find than it is.
+        kind = kind == null ? HostKind.UNKNOWN : kind;
+        signal = signal == null ? SignalStrength.LOW : signal;
+        bridgePeerServerName = bridgePeerServerName == null ? "" : bridgePeerServerName;
+        operatorName = operatorName == null ? "" : operatorName;
+
+        // tier is deliberately NOT defaulted. DifficultyTier's scale starts at 1 and has no "unknown"
+        // member, so any default would be a difficulty claim about a machine nobody has assessed — and
+        // the cheapest one to invent (tier 1) is the claim most likely to get a player killed.
+
+        if (hopsFromVantage < 0) {
+            throw new IllegalArgumentException("hops must be >= 0");
+        }
+        // A non-bridge naming a peer server is how the far side's topology starts leaking: the name is
+        // the one fact a bridge is allowed to publish, and it is allowed because a bridge advertising
+        // the network it links to is what a bridge is for. On anything else it is a fact the player has
+        // no instrument for.
+        if (!bridgePeerServerName.isEmpty() && kind != HostKind.BRIDGE) {
+            throw new IllegalArgumentException("only a BRIDGE may name a peer server");
+        }
+    }
+}

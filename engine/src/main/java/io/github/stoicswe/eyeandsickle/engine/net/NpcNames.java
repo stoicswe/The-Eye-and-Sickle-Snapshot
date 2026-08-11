@@ -1,0 +1,888 @@
+package io.github.stoicswe.eyeandsickle.engine.net;
+
+import java.util.List;
+import java.util.Set;
+
+/**
+ * What the machines and the people on them are called.
+ *
+ * <h2>Two pools, one rule: derived from the address, never drawn</h2>
+ *
+ * Neither name costs an RNG draw. {@code TopologyGenerator}'s class note makes the draw count a pure
+ * function of the world's shape — "draw unconditionally, discard conditionally" — and a name is
+ * chosen once per host, so a draw here would add one per machine and re-roll every existing world.
+ * {@code DocumentPool} already solves this exact problem the same way and for the same reason: hash
+ * the address, index the pool. Determinism comes from the address, which is unique by construction,
+ * so a machine has the same name on every load without anything being stored to make it so.
+ *
+ * <h2>⚠ FNV-1a, never {@code String.hashCode} — and this is measured, not assumed</h2>
+ *
+ * Addresses differ only in their last octet, and {@code String.hashCode} is {@code 31·h + c}, so
+ * consecutive addresses land a fixed distance apart and a modulo walks the pool in lockstep with the
+ * host index. Measured against the eight-name list this replaces, on the real address scheme:
+ *
+ * <pre>
+ *   hashCode: wren dana kai morgan riley sasha toma ves morgan riley
+ *   FNV-1a  : kai morgan riley sasha toma ves wren dana riley dana
+ * </pre>
+ *
+ * The first row is the pool in order. Every server's operators arrived in the same rotation, offset
+ * by the server index — so a player who learned one server's sequence knew every other server's, and
+ * the "random" name was an index in disguise. {@code DocumentPool} carries the same warning about the
+ * same trap; this is the second time it has bitten, which is why the hash lives here rather than in
+ * each caller.
+ *
+ * <h2>The machine name is Docker's scheme, and the adjective rule is Docker's too</h2>
+ *
+ * {@code adjective-pioneer}, after {@code docker/pkg/namesgenerator} — an adjective and a figure from
+ * computing, mathematics, physics, quantum mechanics or astronomy. It reads as a real fleet naming
+ * convention because it is one, and it is a convention a player can go and meet on their own machine
+ * the first time they run a container.
+ *
+ * <p>⚠ <b>NO ADJECTIVE MAY BE DEMEANING, and that is a hard rule rather than taste.</b> These are
+ * real people; most of the pool is dead and a good deal of it is not, and pairing a real name with an
+ * insult is a claim about a person the game has no business making. Docker learned this in public:
+ * its generator carries a special case excluding {@code boring_wozniak}, with the comment that Steve
+ * Wozniak is not boring. A rule over the whole list is the version of that fix which cannot be
+ * defeated by adding one more word.
+ *
+ * <p>⚠ <b>The rule is "not demeaning", NOT "complimentary"</b> — widened on explicit direction, and
+ * the distinction is the whole of it. Atmosphere is welcome and the pool is deliberately moody and a
+ * little suggestive, because this is a game about breaking into other people's machines at night:
+ * {@code sultry}, {@code roguish}, {@code wicked}, {@code clandestine}, {@code illicit-adjacent} words
+ * all read as flavour on a hostname. What stays out is anything that would read as a <em>judgement of
+ * the person</em> — incompetent, dull, ugly, cowardly, and the obvious slurs. The test for a candidate
+ * is not "is it polite" but "would the surname's owner object to being described this way".
+ *
+ * <p>⚠ <b>Surnames only, and no name carrying a hyphen or a space.</b> Three reasons and each one is
+ * load-bearing: the separator is a hyphen, so {@code bold-berners-lee} cannot be split back into its
+ * two halves by anything reading it; RFC 1123 governs the result, because these names reach
+ * {@code Hostname}'s vocabulary and a space is not a legal host label; and a bare surname makes no
+ * claim about the person beyond the surname existing, so nothing here can state a real-world fact
+ * that {@code docs/education}'s verification rule would have to stand behind.
+ *
+ * <h2>⚠ A machine name must NOT encode what the machine is</h2>
+ *
+ * Carried over from {@code HostArchetypes.hostLabel}, which this replaces, and it is the constraint
+ * that decides the scheme. Naming a node's type is what the 15 EC Passive Sniffer sells
+ * ({@code docs/design/07-recon-tools.md} §1), so a label like {@code sentry-04} would hand out a
+ * purchased tool's entire product at the moment of discovery.
+ *
+ * <p>The scheme this replaced leaked it in a quieter way, which is worth recording because it is the
+ * kind of thing that survives review: labels were {@code <server>-<index>} and the generator makes
+ * host index 0 the gateway on every server, always. So {@code home-relay-00} was a free, reliable
+ * "this is the gateway" for anyone who noticed the pattern — the sniffer's answer, given away by a
+ * counter. An adjective and a surname correlate with nothing.
+ */
+public final class NpcNames {
+
+    private NpcNames() {}
+
+    /**
+     * The people. Ordinary given names, lowercase, short enough to be real Unix account names.
+     *
+     * <h2>The pool is deliberately not from one place</h2>
+     *
+     * English, Nordic and Romance names were the original set; Korean, Japanese and Norwegian names were
+     * added on explicit direction, then Chinese and Russian ones. A surveillance state's network is staffed by whoever
+     * lives there, and a machine room where everybody is called Dana or Morgan reads as a set built
+     * from one writer's address book.
+     *
+     * <p>⚠ <b>SEVEN CHARACTERS IS A HARD CEILING, and it is a LAYOUT contract, not a style rule.</b>
+     * The account name shares the network map's address line with the address itself, and that line
+     * is {@code UiTokens.NET_NODE_COLS} = 18 glyph cells: one for the selection gutter, up to nine for
+     * the widest address this scheme can produce ({@code 10.6.0.51}, at the published cap of fifty
+     * machines a server), one separator, leaving <b>seven</b>. An eighth character does not wrap, it
+     * is silently clipped by {@code NetCanvas}, so a name would lose its last letter on the primary
+     * surface with nothing reporting it. {@code ragnhild} and {@code torbjorn} were dropped from the
+     * Norwegian set for exactly this and for no other reason. {@code NpcNamesTest} pins the ceiling.
+     *
+     * <p>⚠ <b>Deliberately not de-collided across the world.</b> Two machines each having an operator
+     * called {@code dana} is what a network of a few hundred people actually looks like, and a
+     * username is namespaced by the machine it is on — {@code dana@10.2.0.7} and {@code dana@10.4.0.3}
+     * are not ambiguous. Forcing uniqueness would make the name a hidden identifier for the host,
+     * which is the opposite of what it is.
+     */
+    private static final List<String> OPERATORS = List.of(
+            "adae", "akane", "akira", "alyona", "anette", "anya", "aoi", "areum", "ari", "arkady", "astrid", "bex",
+            "bing", "birger", "bjorn", "bo", "bodhi", "bohyun", "boram", "boris", "brede", "cato", "chaewon", "chen",
+            "cheng", "cira", "daeun", "dagny", "daiki", "dain", "dana", "dasha", "dev", "dima", "dmitri", "dohyun",
+            "dong", "einar", "eirik", "elke", "emi", "esme", "eunji", "eunwoo", "fang", "faro", "fedor", "feng",
+            "fenna", "finn", "frida", "fumi", "galina", "gang", "geir", "gerd", "gil", "gleb", "gunnar", "guo", "gyuri",
+            "haeun", "hale", "halvor", "hana", "hao", "haru", "haruto", "heng", "henrik", "hilde", "hinata", "hong",
+            "hui", "hyejin", "hyunwoo", "igor", "ilma", "ines", "inger", "ingrid", "inna", "irina", "iseul", "ivar",
+            "ivo", "jae", "jaehyun", "jaro", "jia", "jihoon", "jimin", "jing", "jinho", "jisoo", "jiwoo", "jonas",
+            "jorun", "juan", "jun", "juno", "kai", "kaito", "kang", "kaori", "kari", "katya", "kazu", "keiko", "kenji",
+            "kesh", "kira", "kirsi", "kjell", "klim", "knut", "kolya", "koto", "kun", "lan", "lars", "lasse", "lei",
+            "leif", "lena", "lev", "li", "lian", "liang", "lida", "ling", "lior", "liv", "luo", "lyuba", "magnus",
+            "mako", "maks", "marit", "mave", "mei", "meret", "mette", "michi", "midori", "mila", "min", "ming", "minho",
+            "minjun", "minseo", "mira", "mirae", "misha", "morgan", "na", "nadia", "nadya", "nan", "nao", "naoki",
+            "nari", "nayeon", "nell", "nika", "niko", "nils", "nina", "ning", "njal", "noa", "nobu", "odile", "ola",
+            "olav", "oleg", "olga", "oren", "osamu", "oyvind", "pasha", "pavel", "peng", "per", "pia", "ping", "polina",
+            "pyotr", "qi", "qiang", "qing", "quill", "quin", "ragnar", "raisa", "rei", "ren", "rhea", "riku", "riley",
+            "rin", "rita", "roman", "rui", "rune", "ruslan", "sable", "saerom", "saki", "sakura", "sasha", "seojun",
+            "seoyeon", "shan", "shin", "shiro", "shu", "sigrid", "sindre", "siv", "sofia", "sohee", "solveig", "song",
+            "sonya", "sora", "soren", "soyeon", "stas", "sungmin", "sveta", "taeyang", "takumi", "tam", "tanya", "tao",
+            "tariq", "taro", "tian", "timur", "ting", "toma", "tomo", "tosya", "tove", "trygve", "tsubasa", "uli",
+            "ulla", "ulrik", "ume", "umi", "unni", "vadim", "valya", "vanya", "vegard", "vera", "ves", "vidar", "vika",
+            "vilde", "vito", "vitya", "vlad", "wanda", "wataru", "wei", "wen", "wren", "wynn", "xan", "xia", "xiang",
+            "xin", "xiu", "xue", "yan", "yao", "yara", "yeji", "yerin", "yi", "ying", "ylva", "yong", "yoshi", "yu",
+            "yui", "yuki", "yulia", "yun", "yuna", "yuri", "yusuf", "yusuke", "yuto", "zara", "zeph", "zhao", "zhen",
+            "zhi", "zhu", "zina", "zola", "zoya");
+
+    /**
+     * The adjectives. See the class note: <b>none of these may be pejorative</b>, because each one is
+     * going to be attached to a real person's surname.
+     */
+    private static final List<String> ADJECTIVES = List.of(
+            "admiring",
+            "agile",
+            "alluring",
+            "amber",
+            "ample",
+            "ardent",
+            "audacious",
+            "blazing",
+            "bold",
+            "brash",
+            "brave",
+            "breezy",
+            "bright",
+            "brooding",
+            "calm",
+            "candid",
+            "clandestine",
+            "clever",
+            "cobalt",
+            "coral",
+            "cosmic",
+            "covert",
+            "coy",
+            "crimson",
+            "cryptic",
+            "crystal",
+            "curious",
+            "dapper",
+            "daring",
+            "dashing",
+            "dazzling",
+            "deft",
+            "devoted",
+            "dreamy",
+            "dusky",
+            "eager",
+            "ebon",
+            "elated",
+            "electric",
+            "elegant",
+            "ember",
+            "enchanted",
+            "epic",
+            "exact",
+            "fearless",
+            "feisty",
+            "fervent",
+            "fierce",
+            "fleet",
+            "flint",
+            "flirty",
+            "frosted",
+            "gallant",
+            "gentle",
+            "ghostly",
+            "gifted",
+            "gilded",
+            "glacial",
+            "gleaming",
+            "glossy",
+            "glowing",
+            "golden",
+            "graceful",
+            "granite",
+            "happy",
+            "hardy",
+            "heady",
+            "hidden",
+            "hopeful",
+            "humming",
+            "hushed",
+            "indigo",
+            "intrepid",
+            "ivory",
+            "jaunty",
+            "jolly",
+            "jovial",
+            "keen",
+            "kindly",
+            "languid",
+            "lucid",
+            "lucky",
+            "lunar",
+            "lush",
+            "magnetic",
+            "mellow",
+            "midnight",
+            "modest",
+            "molten",
+            "moonlit",
+            "muted",
+            "mystic",
+            "nimble",
+            "noble",
+            "nocturnal",
+            "nova",
+            "obscure",
+            "obsidian",
+            "onyx",
+            "opal",
+            "opulent",
+            "patient",
+            "peaceful",
+            "phantom",
+            "plucky",
+            "plush",
+            "polar",
+            "practical",
+            "prismatic",
+            "quartz",
+            "quick",
+            "quiet",
+            "radiant",
+            "rakish",
+            "rapid",
+            "reckless",
+            "resolute",
+            "restive",
+            "restless",
+            "roaring",
+            "rogue",
+            "roguish",
+            "ruby",
+            "russet",
+            "sage",
+            "sapphire",
+            "saucy",
+            "scarlet",
+            "serene",
+            "shadowed",
+            "sharp",
+            "shrouded",
+            "silent",
+            "silken",
+            "silver",
+            "sincere",
+            "sleek",
+            "smoky",
+            "solar",
+            "spectral",
+            "spry",
+            "stealthy",
+            "stellar",
+            "stoic",
+            "storied",
+            "sturdy",
+            "sublime",
+            "subtle",
+            "sultry",
+            "sumptuous",
+            "sunny",
+            "swift",
+            "sylvan",
+            "teal",
+            "tempest",
+            "tempting",
+            "tender",
+            "thriving",
+            "tidal",
+            "tranquil",
+            "twilight",
+            "umber",
+            "undaunted",
+            "unruly",
+            "upbeat",
+            "valiant",
+            "veiled",
+            "velvet",
+            "verdant",
+            "vesper",
+            "vibrant",
+            "vigilant",
+            "vivid",
+            "wandering",
+            "wicked",
+            "wild",
+            "wily",
+            "winsome",
+            "wise",
+            "wistful",
+            "witty",
+            "wondrous",
+            "zephyr",
+            "zesty");
+
+    /**
+     * The pioneers: computing, mathematics, physics, quantum mechanics and astronomy.
+     *
+     * <p>Surnames only, one word, letters only — see the class note for why all three matter. Where a
+     * surname is shared by figures in more than one of the five fields ({@code thomson},
+     * {@code hamilton}, {@code clarke}) that is a feature of the naming and not a collision: the pool
+     * is a pool of names, and nothing downstream resolves one to a person.
+     */
+    private static final List<String> PIONEERS = List.of(
+            // Computing
+            "aiken",
+            "allen",
+            "babbage",
+            "backus",
+            "bartik",
+            "cerf",
+            "codd",
+            "dijkstra",
+            "eckert",
+            "engelbart",
+            "goldberg",
+            "hamilton",
+            "hamming",
+            "hoare",
+            "holberton",
+            "hollerith",
+            "hopper",
+            "kay",
+            "kernighan",
+            "knuth",
+            "lamport",
+            "liskov",
+            "lovelace",
+            "mauchly",
+            "mccarthy",
+            "minsky",
+            "perlis",
+            "ritchie",
+            "shannon",
+            "stallman",
+            "sutherland",
+            "thompson",
+            "torvalds",
+            "turing",
+            "wilkes",
+            "wozniak",
+            "zuse",
+            // Cryptography
+            "adleman",
+            "brassard",
+            "diffie",
+            "hellman",
+            "merkle",
+            "rivest",
+            "shamir",
+            // Mathematics
+            "abel",
+            "archimedes",
+            "banach",
+            "bernoulli",
+            "cantor",
+            "cauchy",
+            "descartes",
+            "erdos",
+            "euclid",
+            "euler",
+            "fermat",
+            "fibonacci",
+            "fourier",
+            "galois",
+            "gauss",
+            "germain",
+            "godel",
+            "hilbert",
+            "hypatia",
+            "khwarizmi",
+            "kolmogorov",
+            "kovalevskaya",
+            "laplace",
+            "leibniz",
+            "mandelbrot",
+            "markov",
+            "mirzakhani",
+            "noether",
+            "pascal",
+            "poincare",
+            "ramanujan",
+            "riemann",
+            "tarski",
+            "uhlenbeck",
+            // Physics
+            "ampere",
+            "bardeen",
+            "bohr",
+            "boltzmann",
+            "born",
+            "brattain",
+            "chadwick",
+            "coulomb",
+            "curie",
+            "dirac",
+            "einstein",
+            "faraday",
+            "fermi",
+            "feynman",
+            "franklin",
+            "goeppert",
+            "heisenberg",
+            "hertz",
+            "joule",
+            "kelvin",
+            "landau",
+            "lorentz",
+            "maxwell",
+            "meitner",
+            "newton",
+            "ohm",
+            "pauli",
+            "planck",
+            "rutherford",
+            "schrodinger",
+            "shockley",
+            "tesla",
+            "thomson",
+            "volta",
+            "wu",
+            "yalow",
+            // Quantum
+            "aspect",
+            "bell",
+            "bennett",
+            "bose",
+            "clauser",
+            "deutsch",
+            "everett",
+            "grover",
+            "haroche",
+            "kitaev",
+            "preskill",
+            "shor",
+            "wheeler",
+            "wineland",
+            "zeilinger",
+            // Astronomy
+            "brahe",
+            "burnell",
+            "cannon",
+            "cassini",
+            "chandrasekhar",
+            "copernicus",
+            "eddington",
+            "galileo",
+            "halley",
+            "herschel",
+            "hoyle",
+            "hubble",
+            "huygens",
+            "kepler",
+            "kuiper",
+            "leavitt",
+            "lemaitre",
+            "messier",
+            "mitchell",
+            "oort",
+            "payne",
+            "penrose",
+            "ptolemy",
+            "rubin",
+            "sagan",
+            "shapley",
+            "slipher",
+            "somerville",
+            "tombaugh",
+            "zwicky");
+
+    /** The pools, for tests and for anything that wants to report how large the space is. */
+    public static List<String> operators() {
+        return OPERATORS;
+    }
+
+    public static List<String> adjectives() {
+        return ADJECTIVES;
+    }
+
+    public static List<String> pioneers() {
+        return PIONEERS;
+    }
+
+    public static List<String> characters() {
+        return CHARACTERS;
+    }
+
+    /**
+     * The operator account on the machine at {@code address}.
+     *
+     * <p>A pure function of the address, so it survives a reload with nothing stored — which is what
+     * makes {@code VirtualFs}' generated home directory stable across visits, and that stability is
+     * what {@code docs/design/04-mining.md} §3.1's "was this here before?" is built on.
+     */
+    public static String operator(String address) {
+        return OPERATORS.get((int) Math.floorMod(hash(address), (long) OPERATORS.size()));
+    }
+
+    /**
+     * The characters. What a SERVER is named after — {@code adjective-character}.
+     *
+     * <h2>Fictional on purpose, where the machines' pool is real on purpose</h2>
+     *
+     * {@link #PIONEERS} is scientists and mathematicians, and it carries a hard rule because those
+     * are real people: <b>no adjective may be demeaning</b>, because pairing a real name with an
+     * insult is a claim about a person the game has no business making. This pool is the other case
+     * entirely — every name here belongs to a character in a game or a novel — so the rule that binds
+     * it is a different one, and both halves of that difference matter.
+     *
+     * <p>⚠ <b>What is still forbidden: a REAL person's name.</b> The generated set was reviewed for
+     * exactly this and three were dropped — {@code blavatsky} (a historical occultist, not a game
+     * character), {@code zidane} (Final Fantasy IX's protagonist, and also a very famous living
+     * footballer, and it is the footballer a hostname would read as), and {@code bohemond} (a real
+     * crusader). ⚠ {@code heisenberg} was dropped by the collision check rather than by review, and
+     * the reason is worth keeping: Resident Evil Village has a Karl Heisenberg, {@link #PIONEERS} has
+     * Werner Heisenberg, and a name in both pools reads as the physicist wherever it appears.
+     *
+     * <p>⚠ <b>And a species is not a character.</b> {@code necron}, {@code pfhor} and {@code jjaro}
+     * were harvested and removed: {@code wicked-necron} names a race rather than a person, which is
+     * the one way this pool can read as something other than a name.
+     *
+     * <h2>⚠ ORDINARY GIVEN NAMES AND COMMON WORDS ARE OUT, and that is what makes the scheme work</h2>
+     *
+     * A hostname reads as a reference only if the second half is distinctive. {@code wicked-sam},
+     * {@code wicked-paul} and {@code wicked-storm} are not references to Death Stranding, Dune or
+     * anything else — they are an adjective and an ordinary word. So Sam Porter Bridges is absent and
+     * Paul Atreides appears as {@code muaddib} and as {@code atreides}, which are.
+     *
+     * <p>⚠ Seven more were dropped for colliding with {@link #OPERATORS} — {@code anya}, {@code
+     * magnus}, {@code vlad} and friends. An account name and a server name are different namespaces
+     * and would not actually be ambiguous, but a player who has just met an operator called
+     * {@code magnus} and then finds a server called {@code roguish-magnus} will reasonably think the
+     * two are connected, and they are not.
+     *
+     * <h2>How it was built</h2>
+     *
+     * Harvested across the fifteen franchises named in the request — Final Fantasy, Zelda, Cyberpunk
+     * 2077/Edgerunners, Cronos: The New Dawn, Marathon, Portal, Half-Life, Death Stranding, Tomb
+     * Raider, Resident Evil, Watch Dogs, Wolfenstein, Doom, Warhammer 40,000, Warhammer
+     * Fantasy/Age of Sigmar and Dune — then filtered mechanically (a–z only, 3–12 characters, one
+     * word, no collision with the other three pools) and reviewed for invented names, real people,
+     * species-not-characters and words that read as adjectives.
+     *
+     * <p>⚠ <b>3–12 characters, and the ceiling is a layout figure.</b> A server name reaches the
+     * map's tab strip and its header line, where {@link #OPERATORS}' much tighter seven-character
+     * rule does not apply — that one is the network map's 18-cell address line. Twelve is what keeps
+     * a row of tabs from wrapping at the panel's smallest usable width.
+     *
+     * <p>⚠ <b>Names, not text.</b> Nothing here reproduces anything from those works: a proper noun
+     * is not the work, and this pool states no fact about any of them — which is the same bar
+     * {@link #PIONEERS} clears by carrying surnames alone.
+     */
+    private static final List<String> CHARACTERS = List.of(
+            "abaddon", "abhorash", "abraxia", "adawong", "aenarion", "aeris", "aerith", "agahnim", "agatone",
+            "agemman", "agitha", "agrias", "ahriman", "aiden", "alarielle", "alberic", "alcina", "alexia", "alfonzo",
+            "alia", "alisaie", "alister", "alith", "alpharius", "alphinaud", "alrik", "alvarez", "alyx", "amarant",
+            "amaru", "amberley", "amelie", "angeal", "angelos", "angron", "anirul", "anjean", "anju", "anrakyr",
+            "apophas", "arachnotron", "arahan", "araloth", "aranea", "aranessa", "arasaka", "arbaal", "archaon",
+            "archvile", "ardbert", "ardyn", "argath", "arjac", "arkhan", "artemis", "aryll", "ashe", "ashei",
+            "ashford", "ashley", "asmodai", "astorath", "asurmen", "asuryan", "atreides", "auron", "auru", "avalenor",
+            "aventis", "aximand", "aymeric", "azhag", "azrael", "badrukk", "bagley", "bahamut", "baharroth",
+            "balthier", "banon", "baralai", "barbariccia", "barnabas", "barney", "barret", "barry", "barthandelus",
+            "bartmoss", "bartoli", "bartz", "basch", "batreaux", "beatrix", "becker", "beedle", "belakor", "belegar",
+            "belial", "bellonda", "bellum", "belthanos", "benedikta", "beneviento", "beowulf", "betruger",
+            "bhunivelze", "biggs", "bijaz", "birkin", "blackhand", "blazkowicz", "bludo", "bolson", "bombate",
+            "boneripper", "boone", "brahne", "brandt", "braska", "breen", "brenks", "bridget", "brigitte", "brokk",
+            "bugenhagen", "bugman", "burnside", "burzmali", "byrne", "cacodemon", "cagnazzo", "caius", "caledor",
+            "calgar", "calhoun", "campbell", "caradryan", "carstein", "carthalos", "cass", "cassius", "cawl", "cecil",
+            "cegorach", "celes", "celestine", "chakax", "chani", "chell", "cherubael", "ciaphas", "cid", "cidolfus",
+            "ciela", "cissnei", "clive", "corax", "corbulo", "corrino", "corswain", "coteaz", "cremia", "croft",
+            "cunningham", "curze", "cyberdemon", "cylostra", "dampe", "dante", "daphnes", "darbus", "darcy",
+            "darkstrider", "darmani", "daruk", "darunia", "davoth", "deadman", "deathshead", "dechala", "defalt",
+            "delamain", "delita", "desch", "dexter", "dhawan", "diabolos", "diehardman", "dimitrescu", "dion", "doga",
+            "dollman", "dominguez", "doomguy", "dorephan", "dorio", "dorn", "dracothion", "draigo", "drazhar",
+            "drycha", "duncan", "durandal", "durthu", "dusan", "dycedarg", "dysley", "eckhardt", "edea", "edric",
+            "egrimm", "eiko", "eisenhorn", "eldin", "eldrad", "eli", "elidibus", "ellone", "elmdor", "elspeth",
+            "eltharion", "emetselch", "engel", "ephrael", "epidemius", "epona", "erebus", "estinien", "eternus",
+            "ethan", "etzli", "eurodyne", "eveline", "evelyn", "excella", "exdeath", "ezekiel", "ezlo", "fabius",
+            "fado", "faris", "farok", "faron", "farore", "farsight", "feirros", "fenring", "fergus", "ferrus",
+            "festus", "feyd", "finubar", "firion", "fran", "franz", "freeman", "freya", "fuegan", "fulgrim", "fusoya",
+            "gabranth", "gaepora", "gafgarion", "galrauch", "galuf", "ganon", "ganondorf", "gardus", "garro", "gau",
+            "gelt", "genevieve", "gestahl", "ghanima", "ghazghkull", "ghirahim", "ghorros", "gilgamesh", "gilles",
+            "gippal", "gladio", "glados", "glossu", "glutos", "gman", "gobsprakk", "golbez", "golgfag", "gonarch",
+            "gorbad", "gordon", "gordrakk", "gorfang", "gork", "gorkamorka", "gorthor", "gotrek", "greasus", "greyfax",
+            "grigori", "grimaldus", "grimgor", "grimnar", "grimnir", "grom", "grombrindal", "groose", "grosse",
+            "grotsnik", "grungni", "grungsson", "guilliman", "haarken", "halleck", "hamilcar", "hanako", "hansen",
+            "harah", "harkon", "harkonnen", "hasimir", "hass", "haurchefant", "hawat", "hayden", "hayt", "heartman",
+            "heinrich", "helborg", "helbrecht", "helga", "hellebron", "helsnicht", "hesperax", "hestu", "hilda",
+            "himiko", "hojo", "holloway", "honsou", "horatio", "horstmann", "horus", "hraesvelgr", "hunnigan", "huron",
+            "huss", "hydaelyn", "hylia", "ibram", "ifrit", "ignis", "ikit", "ilia", "illic", "imotekh", "impa",
+            "impaz", "imrik", "ingo", "ingus", "ionus", "irulan", "irvine", "isabella", "isha", "ixion", "jabun",
+            "jackie", "jaghatai", "jainzar", "jamis", "jecht", "jenova", "jessica", "jonah", "jonson", "jordi",
+            "junith", "jurgen", "kaepora", "kafei", "kain", "kairos", "kantor", "karamazov", "karanak", "karandras",
+            "karazai", "kass", "katakros", "katarin", "kayvaan", "keeler", "kefka", "kelley", "kelly", "kemmler",
+            "kennedy", "kenney", "khaine", "khalida", "kharn", "khatep", "khazrak", "kholek", "khorne", "kilton",
+            "kimahri", "kiros", "kleiner", "kohga", "koltin", "komali", "konrad", "konstantin", "korba", "korhil",
+            "kostaltyn", "kotake", "koume", "kouran", "kragg", "kragnos", "krauser", "krell", "kreutz", "krile",
+            "kroak", "krondys", "kryptman", "kuja", "kurdoss", "kurnous", "kurtis", "kushinada", "kynes", "laguna",
+            "lahabrea", "lanayru", "lara", "larkin", "larsa", "larsen", "larson", "laruto", "leela", "leila",
+            "leitdorf", "lelith", "leman", "lemartes", "lenna", "lenne", "lenni", "leoncoeur", "leonhart", "leontus",
+            "leto", "levias", "liebwitz", "lille", "linebeck", "lizzy", "locke", "lockne", "loken", "lokhir", "lorgar",
+            "lotann", "lotara", "lucius", "lucyna", "ludenhof", "lulu", "lunafreya", "luneth", "lysander", "lyse",
+            "macharius", "maduin", "magnusson", "maiava", "maiko", "majora", "makaisson", "makar", "makari", "malagor",
+            "malcador", "malekith", "malerion", "malik", "malladus", "maloghurst", "malon", "malys", "manann",
+            "mancubus", "mannfred", "mapes", "marbo", "marcus", "marguerite", "marin", "marneus", "mateus", "mathias",
+            "maykr", "mazdamundi", "mcneil", "medli", "meliadoul", "mendez", "mephiston", "meredith", "merlwyb",
+            "meteion", "midna", "mido", "mikau", "mineru", "minfilia", "minwu", "mipha", "miranda", "mkoll", "mog",
+            "mohiam", "moira", "moneo", "morathi", "moreau", "morghur", "morgiana", "morgwaeth", "mork", "mortarion",
+            "morvenn", "mossman", "muaddib", "murbella", "mustadio", "muzu", "nabooru", "naestra", "nagash", "nakai",
+            "namri", "nanaki", "natla", "navi", "nayl", "nayla", "nayru", "nazdreg", "neave", "neferata", "nekaph",
+            "nemec", "nidhogg", "nihilanth", "nikolai", "nishimura", "nivans", "noctilus", "noctis", "nooj", "nurgle",
+            "nurglitch", "obyron", "odrade", "olivia", "oliwa", "ollanius", "olynder", "omegon", "ondore", "onox",
+            "ooccoo", "ordona", "orikan", "orlandeau", "oshus", "ostankya", "otheym", "ovelia", "paine", "palom",
+            "panam", "papalymo", "paya", "pearce", "penelo", "peralez", "perturabo", "pilar", "piter", "placide",
+            "porom", "prishe", "prompto", "purah", "qruze", "queek", "quina", "quinn", "quistis", "rabban", "radukar",
+            "rakarth", "ralis", "ramallo", "ramuh", "ramza", "rattmann", "raubahn", "rauru", "ravenor", "ravio",
+            "ravus", "rawne", "rebecca", "reddas", "redfield", "refia", "regis", "reikenor", "relm", "renado", "reno",
+            "repanse", "revali", "reyes", "rhoam", "riju", "rikku", "rinoa", "robbie", "rosalind", "roth", "rotigus",
+            "royce", "rubicante", "rudi", "rufus", "rusl", "rutela", "ruto", "rydia", "rylanor", "ryne", "sabaoth",
+            "sabiha", "sabin", "sabine", "saburo", "saddler", "sahaal", "sahasrahla", "salazar", "sammael", "samur",
+            "sandayu", "sanguinius", "sanguinor", "saria", "sarthorael", "sauchak", "sazh", "scarmiglione", "schabbs",
+            "schaeffer", "schwangyu", "schwarzhelm", "scyla", "scytale", "seifer", "selphie", "sephiroth", "serah",
+            "settra", "setzer", "sevatar", "seymour", "shaddam", "shadowsun", "shalaxi", "shallya", "shantotto",
+            "sheeana", "sheik", "shephard", "sherawat", "sheva", "shuyin", "sicarius", "sidon", "sigismund", "sigmar",
+            "sigrun", "sigvald", "silverhand", "sindermann", "siona", "sitara", "skarbrand", "skarsnik", "skrag",
+            "skragrott", "skreech", "skrolk", "skullkid", "skulltaker", "slaanesh", "smasher", "snagla", "snikch",
+            "snikrot", "snorri", "solomon", "sonon", "sotek", "spencer", "spesh", "steiner", "stilgar", "strago",
+            "straken", "strasse", "strauss", "stronos", "swann", "sylandri", "szarekh", "szeras", "tael", "takemura",
+            "talos", "tancred", "taraza", "tarin", "tarman", "tarvitz", "tatl", "taurox", "tbone", "teba", "teclis",
+            "teg", "tehenhauin", "telion", "tellah", "telma", "terra", "tetra", "tfear", "thancred", "thanquol",
+            "thorek", "thorgrim", "thostos", "thraka", "throgg", "throt", "thufir", "tidus", "tifa", "tigurius",
+            "titus", "todbringer", "torgaddon", "torgal", "trajann", "traxus", "trazyn", "tretch", "trevor", "trugg",
+            "tseng", "tuek", "tulin", "tullaris", "twinrova", "tycho", "tyekanik", "typhus", "tyrion", "tzeentch",
+            "ulric", "ulrika", "ultima", "ultimecia", "ultros", "umaro", "unei", "ungrim", "unuratu", "urbosa",
+            "urianger", "ursarkar", "ursun", "ushoran", "usul", "vaan", "vaati", "valaya", "valdor", "valefor",
+            "valen", "valentine", "valkia", "valoo", "valten", "vance", "vandire", "vandus", "vanille", "varis",
+            "vashtorr", "vayne", "vect", "vega", "venat", "ventris", "veran", "viktor", "vilitch", "vincent", "vivi",
+            "voldus", "volkmar", "volturnos", "volvagia", "vulkan", "waff", "wakako", "wakka", "walach", "wazdakka",
+            "wensicia", "wesker", "wheatley", "whitman", "wiegraf", "wulfhart", "wulfrik", "wurrzag", "wyatt", "xande",
+            "yarrick", "yeul", "yndrasta", "ynnead", "yojimbo", "yona", "yorinobu", "yotsuyu", "yriel", "yshtola",
+            "yueh", "yuffie", "yuga", "yunalesca", "yunobo", "yvraine", "zacharias", "zagstruk", "zahndrekh",
+            "zalbaag", "zant", "zargabaath", "zeid", "zelda", "zell", "zemus", "zenos", "zeromus", "zodiark");
+
+    /**
+     * The name of a <b>server</b>: {@code adjective-character}.
+     *
+     * <h2>Why servers have their own pool</h2>
+     *
+     * A server name is the one place in this world a player reads a <em>place</em> rather than a
+     * machine. It reaches them on the map's tab strip, on the header line, and — most importantly —
+     * out of a <b>bridge</b>, which advertises the network on its far side and nothing else
+     * ({@code docs/design/17} §3.1). So it wants to sound like somewhere to go, and the machines'
+     * pool of scientists does not: {@code wicked-turing} is a box, and a player who saw it on a tab
+     * would reasonably think a tab was a machine.
+     *
+     * <p>⚠ <b>The scheme is deliberately identical.</b> {@code adjective-noun}, hashed from the id,
+     * de-collided by walking — the same shape as {@link #machine}, so the world reads as one naming
+     * convention with two vocabularies rather than as two conventions. The adjectives are shared, and
+     * they are shared on purpose: they have already been through the "not demeaning" rule, and a
+     * second adjective list is a second place for that rule to be forgotten.
+     *
+     * <h2>⚠ The names it replaced were a fixed list of seven, and that was the whole world's</h2>
+     *
+     * {@code HostArchetypes.SERVER_NAMES} was {@code home-relay, south-exchange, north-yard …} — the
+     * same seven places, in the same order, on every seed, because the generation sequence has no
+     * draw slot for a server name. Two players comparing worlds found identical place names attached
+     * to different shapes. Hashing the id gives a different set per world at no cost in draws.
+     *
+     * <h2>⚠ THE SALT IS THE WHOLE POINT, AND WITHOUT IT THIS PROMISE WAS FALSE (fixed 2026-08-10)</h2>
+     *
+     * The paragraph above says hashing the id "gives a different set per world". <b>It did not.</b> A
+     * server id is {@code HostArchetypes.serverId(index)} — the literal {@code "srv-0"}, {@code
+     * "srv-1"} — an index and nothing else, identical in every world ever generated. So a hash of it
+     * is identical too: <b>every</b> character's home server was called {@code candid-noctilus}, and
+     * the seven fixed names this replaced had simply been swapped for seven different fixed names.
+     * The defect survived because the naming reads as random and is only visible by comparing two
+     * worlds.
+     *
+     * <p>{@code worldSalt} is what carries the per-world entropy the id never had. It is prepended
+     * rather than appended because FNV-1a mixes forward: a difference in the first bytes avalanches
+     * through the whole digest, where a difference in the last ones reaches the high bits only weakly
+     * — which is the trap {@link AddressHash#unitOf} already records from the other side.
+     *
+     * <p>⚠ <b>Still zero draws.</b> The salt is the character id, which is fixed before the world is
+     * generated and never moves, so this is the same pure function of the save it always was — it
+     * simply has the save's identity in it now. Nothing about the RNG contract changes.
+     *
+     * @param worldSalt what makes two worlds name their servers differently — the character id
+     * @param serverId the id to derive from — stable, unique, and already the join key
+     * @param taken names already handed out; never modified here
+     */
+    public static String server(String worldSalt, String serverId, Set<String> taken) {
+        long h = hash(worldSalt + ' ' + serverId);
+        int adjective = (int) Math.floorMod(h, (long) ADJECTIVES.size());
+        int character = (int) Math.floorMod(h >>> 32, (long) CHARACTERS.size());
+
+        for (int c = 0; c < CHARACTERS.size(); c++) {
+            for (int a = 0; a < ADJECTIVES.size(); a++) {
+                String candidate = ADJECTIVES.get((adjective + a) % ADJECTIVES.size())
+                        + "-"
+                        + CHARACTERS.get((character + c) % CHARACTERS.size());
+                if (taken == null || !taken.contains(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+        return "net-" + Long.toUnsignedString(h, 36);
+    }
+
+    /**
+     * The account a <b>bridge</b> runs under: the character half of the name of the server it
+     * connects to.
+     *
+     * <h2>Why a bridge's operator is not drawn from {@link #OPERATORS} like everyone else's</h2>
+     *
+     * A bridge is the one machine whose whole meaning is somewhere else, and this makes it say so in
+     * the one place a player is already reading — the account in the prompt and on the node box. Where
+     * an ordinary machine's operator is an ordinary person, a bridge is run by whoever the far side is
+     * named for, so {@code roguish-muaddib} is reached through a machine whose account is
+     * {@code muaddib}. It turns the identity finding into a second, quieter way of learning what is on
+     * the other side of a door.
+     *
+     * <h2>⚠ The pools cannot collide, and that is asserted rather than assumed</h2>
+     *
+     * {@code NpcNamesTest.poolsDoNotOverlap} already holds {@link #CHARACTERS} and {@link #OPERATORS}
+     * disjoint, which was written for a different reason (a player who just met an operator called
+     * {@code magnus} would read {@code roguish-magnus} as connected to them). It pays off here: an
+     * account name from this pool is one an ordinary machine could never have, so a bridge's account
+     * is recognisably not a member of the ordinary crew.
+     *
+     * <h2>⚠ IT CAN EXCEED THE SEVEN-CHARACTER OPERATOR BUDGET, and the map clips it</h2>
+     *
+     * {@link #OPERATORS} is capped at seven because the node box's address line has exactly that much
+     * room after the address and a separator. {@link #CHARACTERS} is not — it is capped at twelve for
+     * the tab strip — so {@code amendiares} clips on the box. That is the treatment a machine
+     * <em>name</em> already gets there for the same reason, clipped from the right because a name is
+     * read from its front, with the full string on the tooltip, in the host list and in the recon
+     * file. The alternative was to restrict which characters may name a bridged server, which would
+     * make the server pool depend on a client layout constant.
+     *
+     * @param serverName the far side's name, {@code adjective-character}
+     * @return the character half, or {@code ""} if {@code serverName} is not one this class produced —
+     *     a hand-edited save or a world from before the pool, where the caller falls back to the
+     *     ordinary derivation rather than inventing an account
+     */
+    public static String bridgeOperator(String serverName) {
+        if (!looksLikeServer(serverName)) {
+            return "";
+        }
+        return serverName.substring(serverName.indexOf('-') + 1);
+    }
+
+    /** Whether {@code name} is a server name this class could have produced. */
+    public static boolean looksLikeServer(String name) {
+        if (name == null) {
+            return false;
+        }
+        int split = name.indexOf('-');
+        if (split <= 0 || split == name.length() - 1) {
+            return false;
+        }
+        return ADJECTIVES.contains(name.substring(0, split)) && CHARACTERS.contains(name.substring(split + 1));
+    }
+
+    /**
+     * The name of the machine at {@code address}: {@code adjective-pioneer}.
+     *
+     * <p>⚠ <b>{@code taken} is what makes the name an identifier.</b> The pool is large — 184 × 159,
+     * 29,256 combinations — but a world holds a few hundred machines, and the
+     * birthday bound says a duplicate is not unlikely, it is expected. Two machines called
+     * {@code bold-turing} on one map is worse than a dull name: the map, the list, the shell prompt
+     * and the recon file would all show one string for two hosts, on the surface a player uses to
+     * tell machines apart.
+     *
+     * <p>Resolved the way Docker resolves it — keep looking until the name is free — but
+     * deterministically rather than by re-rolling: walk the adjectives from the hashed start, then
+     * advance the pioneer and walk again. Called in the generator's canonical order (server ascending,
+     * then host ascending) so the assignment is a pure function of the world's shape, exactly like the
+     * draw counts around it.
+     *
+     * <h2>⚠ SALTED PER WORLD (2026-08-10), for {@link #server}'s reason and with more at stake</h2>
+     *
+     * An address is {@code 10.<server>.<page>.<2 + index>} — positions, with no world in them — so an
+     * unsalted hash gave <b>every world the same machine names in the same places</b>: the host at
+     * {@code 10.0.0.2} was the same {@code adjective-pioneer} for every player who ever generated a
+     * character. Worse than the server case in one specific way: host index 0 is always the gateway,
+     * so a fixed mapping made a machine's NAME a reliable tell for what it is — which is exactly the
+     * leak this pool replaced {@code <server>-<NN>} to close, arriving back in a form nobody would
+     * spot without holding two worlds side by side.
+     *
+     * @param worldSalt what makes two worlds name their machines differently — the character id
+     * @param address the machine to name
+     * @param taken names already handed out; never modified here — the caller owns the set, because
+     *     the caller is the only thing that knows when a name has actually been committed to a host
+     */
+    public static String machine(String worldSalt, String address, Set<String> taken) {
+        long h = hash(worldSalt + ' ' + address);
+        int adjective = (int) Math.floorMod(h, (long) ADJECTIVES.size());
+        // A second, independent index off the same hash rather than a second hash: the two pools are
+        // different sizes and co-prime enough that one mixed value indexes both without the pair
+        // correlating. Shifted by 32 so the two indices do not both come off the low bits.
+        int pioneer = (int) Math.floorMod(h >>> 32, (long) PIONEERS.size());
+
+        for (int p = 0; p < PIONEERS.size(); p++) {
+            for (int a = 0; a < ADJECTIVES.size(); a++) {
+                String candidate = ADJECTIVES.get((adjective + a) % ADJECTIVES.size())
+                        + "-"
+                        + PIONEERS.get((pioneer + p) % PIONEERS.size());
+                if (taken == null || !taken.contains(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+        // Unreachable for any world this generator builds — it would need every one of the ~14,000
+        // combinations to be spoken for, against a published cap of fifty machines per server. It
+        // exists because a hand-edited save is not this generator, and returning a duplicate would be
+        // worse than returning something obviously synthetic.
+        return "host-" + Long.toUnsignedString(h, 36);
+    }
+
+    /**
+     * Whether {@code label} is a name this class could have produced.
+     *
+     * <p>Both halves have to be in the pools, so it is a statement about <em>this</em> generator
+     * rather than a shape check — {@code some-thing} is the right shape and is not one of ours.
+     * That matters because the one caller uses it to decide what to overwrite, and a shape check
+     * would eventually rename something it did not put there.
+     *
+     * <p>⚠ It is deliberately <b>not</b> the inverse of "was generated by the old scheme". The old
+     * labels were {@code <server name>-<NN>}, and testing for that would need this class to carry a
+     * copy of {@code HostArchetypes.SERVER_NAMES} and the two-digit suffix — a description of a
+     * format that no longer exists, kept in step by hand. Asking "is this one of mine" needs only
+     * what is already here and stays true however many schemes came before.
+     */
+    public static boolean looksGenerated(String label) {
+        if (label == null) {
+            return false;
+        }
+        int split = label.indexOf('-');
+        if (split <= 0 || split == label.length() - 1) {
+            return false;
+        }
+        return ADJECTIVES.contains(label.substring(0, split)) && PIONEERS.contains(label.substring(split + 1));
+    }
+
+    /**
+     * FNV-1a over the address, folded to 32 bits.
+     *
+     * <p>Identical to {@code DocumentPool.forAddress}'s hash, and deliberately so: both answer "which
+     * entry of a fixed pool does this machine get", both are indexing off addresses that differ in one
+     * octet, and having one of them quietly use a weaker mix is how the two would come to disagree
+     * about whether the pools are evenly spread.
+     */
+    private static long hash(String address) {
+        // ⚠ Moved to AddressHash 2026-08-07, byte-for-byte the same function. A third caller
+        // (MonJobs) was about to make a third copy of it, which is the point at which "identical, and
+        // deliberately so" becomes "nobody extracted it". Delegating rather than inlining keeps this
+        // method as the documented entry point the class comment above still describes.
+        return AddressHash.of(address);
+    }
+}

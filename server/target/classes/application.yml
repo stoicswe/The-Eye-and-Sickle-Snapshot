@@ -1,0 +1,166 @@
+# ---------------------------------------------------------------------------
+# Home server configuration.
+#
+# Everything secret comes from the environment, never from this file. See
+# deploy/docker-compose.yml and deploy/.env.example. Anything you put here is
+# committed to git; .gitignore blocks application-local.yml for local overrides.
+# ---------------------------------------------------------------------------
+spring:
+  application:
+    name: eyeandsickle-server
+
+  datasource:
+    # All game state lives here (Invariant I14). No game data is ever written to
+    # a player's AT Protocol PDS.
+    #
+    # H2, EMBEDDED, file-backed. Replaced PostgreSQL entirely on 2026-08-02: a
+    # self-hoster now needs a JVM and nothing else — no database to install, no
+    # container to run, no connection string to get wrong. That is the whole
+    # point, since the pitch is a spare box.
+    #
+    # ⚠ MODE=PostgreSQL is not decoration: the schema is written in PostgreSQL's
+    # dialect and the migrations were ported against this mode. Removing it breaks
+    # them, and it breaks them at startup rather than subtly.
+    #
+    # ⚠ AUTO_SERVER=TRUE AND DB_CLOSE_ON_EXIT=FALSE ARE MUTUALLY EXCLUSIVE IN H2.
+    # Together they are a hard refusal at CONNECT time — "Feature not supported:
+    # AUTO_SERVER=TRUE && DB_CLOSE_ON_EXIT=FALSE" [50100] — so a server shipped
+    # with both would not start at all. It shipped with both from the PostgreSQL
+    # migration until 2026-08-03, and no test caught it because every test uses an
+    # in-memory URL. A self-hoster running the boot jar would have met it on the
+    # first launch and had nothing to go on.
+    #
+    # DB_CLOSE_ON_EXIT=FALSE is the one kept: H2's shutdown hook otherwise races
+    # the JVM's, and the loser is a half-closed database during graceful shutdown.
+    # AUTO_SERVER only bought attaching a second client to a running server, which
+    # an operator can get by setting EYEANDSICKLE_DB_URL themselves.
+    url: ${EYEANDSICKLE_DB_URL:jdbc:h2:file:./data/eyeandsickle;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_ON_EXIT=FALSE}
+    username: ${EYEANDSICKLE_DB_USER:eyeandsickle}
+    password: ${EYEANDSICKLE_DB_PASSWORD:}
+    hikari:
+      pool-name: eyeandsickle-pool
+      maximum-pool-size: ${EYEANDSICKLE_DB_POOL_MAX:10}
+
+  # No JPA. Data access is Spring's JdbcClient over hand-written SQL mapped to
+  # records (open question A-4, resolved — see server/pom.xml for the reasoning).
+  # Flyway owns the schema outright; nothing at runtime alters it, because an
+  # implicit schema change on a self-hosted server is an unreviewed migration
+  # running on someone else's data.
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/engine,classpath:db/migration/core
+    baseline-on-migrate: false
+    # THREE migration tiers, scanned by ONE Flyway instance, so they share one
+    # flyway_schema_history and one version namespace. Version numbers must not
+    # collide across the directories, and they must ORDER correctly:
+    #
+    #     db/migration/engine      V7          the rules engine's own state
+    #     db/migration/core        V1..V6, V8  the authority tables
+    #     db/migration/federation  V1001+      peers, validators, duels
+    #
+    # `engine` is the tier SINGLE PLAYER runs, alone. The engine is one
+    # implementation that a server drives for LAN and federated play and the
+    # client drives in single player, so its state has to live in the same shape
+    # in both — otherwise the save format is two formats again.
+    #
+    # V7 sits between core's V6 and V8 deliberately: V8 adds the foreign key from
+    # character_game_state to players, so the table must already exist. Flyway
+    # does not require the versions it applies to be contiguous, which is what
+    # lets single player configure `engine` alone and get exactly V7.
+    #
+    # Federation tables only exist on servers that opted into federation, so their
+    # migrations live in a location the `federation` profile below appends. A
+    # federating server's history is then a superset of a non-federating one's,
+    # and turning federation on later only ever appends.
+
+  threads:
+    virtual:
+      enabled: true
+
+# ---------------------------------------------------------------------------
+# OpenAPI / Swagger (docs/architecture/14-api-documentation.md).
+#
+# ⚠ BOTH OFF BY DEFAULT, and that is a decision rather than caution. A home
+# server is closed by default — the allowlist starts empty, LAN mode refuses to
+# bind a public address — and shipping an interactive API console that answers
+# to whoever can reach the port would sit badly beside that. The operator turns
+# it on for their own box:
+#
+#     EYEANDSICKLE_API_DOCS=true    -> GET /v3/api-docs      (the spec)
+#     EYEANDSICKLE_SWAGGER_UI=true  -> GET /swagger-ui.html  (the console)
+#
+# ⚠ Two switches, not one. The SPEC is a static document and is the thing worth
+# publishing; the CONSOLE issues live requests against a running server. An
+# operator who wants to hand a client developer the schema should not have to
+# expose a request builder to do it.
+#
+# ⚠ The spec is generated and CHECKED on every build regardless — OpenApiSpecIT
+# boots the context with docs enabled and asserts the document covers every
+# mapped endpoint. Documentation produced only when somebody remembers to enable
+# it is documentation that has already fallen behind.
+# ---------------------------------------------------------------------------
+springdoc:
+  api-docs:
+    enabled: ${EYEANDSICKLE_API_DOCS:false}
+  swagger-ui:
+    enabled: ${EYEANDSICKLE_SWAGGER_UI:false}
+  # Sorted, so a diff between two versions of the spec shows what CHANGED rather
+  # than what moved. Generation order is otherwise reflection order, which is
+  # stable in practice and guaranteed by nothing.
+  writer-with-order-by-keys: true
+
+server:
+  port: ${EYEANDSICKLE_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  level:
+    io.github.stoicswe.eyeandsickle: ${EYEANDSICKLE_LOG_LEVEL:INFO}
+
+eyeandsickle:
+  # Minecraft-style access control: a self-hosted server is private by default
+  # and the operator chooses who joins (docs/architecture/01 §2).
+  allowlist:
+    enabled: true
+    # Comma-separated AT Protocol DIDs, supplied by the operator. Empty means
+    # nobody joins — deliberately closed by default.
+    dids: ${EYEANDSICKLE_ALLOWLIST_DIDS:}
+
+  federation:
+    # Opt-in (docs/architecture/03 §2). Off means this is a purely local
+    # single-player or friends server: no directory, no validator duty, no
+    # cross-server item transfers.
+    enabled: ${EYEANDSICKLE_FEDERATION_ENABLED:false}
+
+---
+# Activated with: --spring.profiles.active=federation
+spring:
+  config:
+    activate:
+      on-profile: federation
+  flyway:
+    locations: classpath:db/migration/engine,classpath:db/migration/core,classpath:db/migration/federation
+
+eyeandsickle:
+  federation:
+    enabled: true
+    # Recommended starting points from docs/architecture/05 §2, §3. These are
+    # tuning knobs, not invariants — measure against real federation behaviour.
+    quorum:
+      committee-size: 7            # N = 7 -> f = 2 -> 5 of 7 must agree
+      reputation-increase-alpha: 0.05
+      reputation-decrease-beta: 0.25
+      uptime-decay-gamma: 0.10
+      equivocation-floor: 0.10     # hard slash; equivocation is provable
+      newcomer-reputation: 0.40    # cold-start floor, or new servers deadlock

@@ -1,0 +1,1078 @@
+package io.github.stoicswe.eyeandsickle.client.session;
+
+import io.github.stoicswe.eyeandsickle.protocol.game.ComputeBudget;
+import io.github.stoicswe.eyeandsickle.protocol.game.Cycles;
+import io.github.stoicswe.eyeandsickle.protocol.game.Ethecoin;
+import io.github.stoicswe.eyeandsickle.protocol.game.StorageTier;
+import java.net.URI;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Consumer;
+
+/**
+ * A session against a home server.
+ *
+ * <h2>The last-known-good rule</h2>
+ *
+ * Every read here returns the last value the server sent, even while disconnected, and reports
+ * {@link #connected()} false. It never returns null and never blanks a readout. That is deliberate
+ * and it is an accessibility decision as much as a UX one: a HUD that empties when the network hiccups
+ * removes information from a player mid-decision, and {@code docs/client/01-visual-language.md} §2.2.8
+ * gives stale values their own visual state precisely so they can be shown rather than hidden.
+ *
+ * <h2>Refused and unreachable are different, all the way down</h2>
+ *
+ * A refusal comes back as {@code 1} with the server's reason. An unreachable server comes back as
+ * {@code 69} — {@code EX_UNAVAILABLE} — and a sent-but-unanswered request as {@code 75}. §9.4 requires
+ * that "the server refused this" and "we could not reach the server" never collapse into one message,
+ * and giving them different numbers is what makes that structural rather than a matter of copywriting
+ * discipline. This class is where that distinction is actually produced.
+ *
+ * <h2>Status: the transport is not wired</h2>
+ *
+ * <strong>This implementation holds the shape and refuses every intent with {@code EX_UNAVAILABLE}.</strong>
+ * The REST client, the AT Proto OAuth flow and the reconnect loop are <b>CL-8</b> in
+ * {@code docs/design/15-open-questions.md} and are not built. Shipping the class in this state is
+ * deliberate: it makes the port's two-implementation shape real and checkable, it lets the UI be
+ * written against a disconnected session today, and it means the day the transport lands, no view
+ * changes. What it must never become is a class that pretends to have data it does not have.
+ */
+public final class RemoteGameSession implements GameSession {
+
+    /**
+     * What {@link #handle()} answers before anyone has signed in.
+     *
+     * <p>⚠ This class used to take a handle in its constructor and {@code connectOnline} passed it
+     * {@code profile.settings().soloHandle} — so connecting to a home server displayed whatever the
+     * player had named their <em>offline</em> character, forever, and since 2026-07-28 it appeared in
+     * the command-strip prompt too. There is no sign-in yet (<b>CL-8</b>, and
+     * {@code docs/architecture/10-oauth-and-did-resolution.md} §7), so the honest answer is that
+     * nobody is signed in — not a borrowed name from a different game mode.
+     */
+    public static final String NOT_SIGNED_IN = "not signed in";
+
+    private final URI server;
+    private final List<Consumer<GameSession>> listeners = new CopyOnWriteArrayList<>();
+
+    /**
+     * The signed-in identity, or {@code null} before sign-in.
+     *
+     * <p>Not final: sign-in completes <em>after</em> the session exists, because the session is what
+     * carries the request. Written once by {@link #identify}.
+     */
+    private volatile SignedIn identity;
+
+    /** The last thing the server told us. Shown as stale rather than blanked. */
+    private ComputeBudget lastBudget;
+
+    private Ethecoin lastBalance = Ethecoin.ofWei(0);
+    private int lastHeat;
+    private boolean connected;
+
+    /**
+     * The identity a completed sign-in produced.
+     *
+     * <p>⚠ {@code handle} is a <strong>cache with a verified flag</strong>, never the key
+     * ({@code docs/architecture/10-oauth-and-did-resolution.md} §4.1). A DID document's
+     * {@code alsoKnownAs} is self-asserted, so a handle that has not been resolved back to this same
+     * DID must never be drawn as though it had been — hence {@code handleVerified} rather than a bare
+     * string, and hence {@link #handle()} falling back to the DID rather than showing an unverified
+     * name. Handles are also re-claimable after release, which is the second reason nothing is keyed
+     * on one.
+     *
+     * @param did the authenticated identity — the only thing anything is keyed on
+     * @param handle the display handle, or {@code null} if none resolved
+     * @param handleVerified whether {@code handle} was confirmed to resolve back to {@code did}
+     */
+    public record SignedIn(String did, String handle, boolean handleVerified) {}
+
+    public RemoteGameSession(URI server) {
+        this.server = server;
+        // An empty budget rather than null: see the last-known-good rule above. A rig with zero
+        // capacity is obviously wrong on screen, which is better than a crash or a blank.
+        this.lastBudget = new ComputeBudget(UUID.randomUUID(), Cycles.of(0), Cycles.of(0), List.of());
+    }
+
+    public URI server() {
+        return server;
+    }
+
+    private final io.github.stoicswe.eyeandsickle.client.events.EventBus bus =
+            new io.github.stoicswe.eyeandsickle.client.events.EventBus();
+
+    @Override
+    public io.github.stoicswe.eyeandsickle.client.events.EventBus events() {
+        return bus;
+    }
+
+    @Override
+    public SessionMode mode() {
+        return SessionMode.ONLINE;
+    }
+
+    /**
+     * Records the identity a completed sign-in produced.
+     *
+     * @param signedIn the verified identity, or {@code null} to return to signed-out
+     */
+    public void identify(SignedIn signedIn) {
+        this.identity = signedIn;
+        fire();
+    }
+
+    /** @return the signed-in identity, or {@code null} */
+    public SignedIn identity() {
+        return identity;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>⚠ Never borrows the solo character's name — see {@link #NOT_SIGNED_IN}. The order is
+     * deliberate: a <em>verified</em> handle, else the DID, else nothing. An unverified handle is
+     * never shown, because on this client's surfaces a display name is evidence
+     * ({@code docs/design/12-identity-and-social.md}), and a DID nobody can read is a smaller failure
+     * than a name somebody else asserted.
+     */
+    @Override
+    public String handle() {
+        SignedIn who = identity;
+        if (who == null) {
+            return NOT_SIGNED_IN;
+        }
+        return who.handleVerified() && who.handle() != null ? who.handle() : who.did();
+    }
+
+    @Override
+    public String avatar() {
+        return "";
+    }
+
+    @Override
+    public Outcome setAvatar(String base64Png) {
+        return unavailable();
+    }
+
+    @Override
+    public ComputeBudget computeBudget() {
+        return lastBudget;
+    }
+
+    @Override
+    public Ethecoin balance() {
+        return lastBalance;
+    }
+
+    @Override
+    public int personalHeat() {
+        return lastHeat;
+    }
+
+    @Override
+    public IdentityCard identityCard() {
+        // ⚠ The DID, and the reputations are ZERO rather than invented. A federated character's
+        // trader and faction standing are the SERVER's to report (I14) and the snapshot does not
+        // carry them yet — showing a plausible number the server never sent is the failure this
+        // whole session class is written to avoid. When the snapshot grows the fields, they land
+        // here and nowhere else.
+        return new IdentityCard(handle(), identity == null ? "" : identity.did(), true, lastHeat, 0, 0, 0);
+    }
+
+    @Override
+    public List<InventoryItem> items(StorageTier tier) {
+        return List.of();
+    }
+
+    @Override
+    public List<LedgerRow> ledger(int limit) {
+        return List.of();
+    }
+
+    @Override
+    public List<KnownNode> knownNodes() {
+        return List.of();
+    }
+
+    /**
+     * ⚠ Empty, always. An unprovoked intrusion is a rule the SERVER runs, and it reaches a federated
+     * client as an event rather than by the client asking — the same shape everything else here takes.
+     * Answering from a local roll would have the client inventing an attack nobody made.
+     */
+    @Override
+    public java.util.Optional<PendingIntrusion> pendingIntrusion() {
+        return java.util.Optional.empty();
+    }
+
+    /** ⚠ Refused: settling an intrusion is the server's, and this session has none pending to settle. */
+    @Override
+    public Outcome resolvePendingIntrusion(boolean held) {
+        return Outcome.refused("defence outcomes are settled by the home server");
+    }
+
+    @Override
+    public List<ArmedDefense> defenses() {
+        return List.of();
+    }
+
+    @Override
+    public List<LogLine> log(int minSeverity, int limit) {
+        return List.of();
+    }
+
+    @Override
+    public MiningSummary mining() {
+        return new MiningSummary(0, java.math.BigInteger.ZERO, java.math.BigInteger.ZERO, 0);
+    }
+
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.MiningSnapshot miningChain() {
+        // A disconnected chain has no height and no difficulty. Zeros rather than an invented
+        // genesis: the readout says "not connected", which is the truth, instead of drawing a chain
+        // that does not exist.
+        return new io.github.stoicswe.eyeandsickle.protocol.game.MiningSnapshot(
+                io.github.stoicswe.eyeandsickle.protocol.game.MiningMode.POOLED,
+                0L,
+                0L,
+                0L,
+                0.0d,
+                0.0d,
+                0L,
+                0L,
+                0.0d,
+                -1L,
+                java.math.BigInteger.ZERO,
+                java.math.BigInteger.ZERO,
+                0L,
+                java.math.BigInteger.ZERO,
+                0,
+                null,
+                null,
+                java.math.BigInteger.ZERO,
+                0L,
+                0L);
+    }
+
+    @Override
+    public java.util.List<RunningTask> tasks() {
+        // The server is authoritative for what a rig is doing (I14). Empty is the honest answer for
+        // a transport that does not exist yet, and the readout says "nothing running" rather than
+        // inventing activity.
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.time.Instant now() {
+        // The server is authoritative for game time too, once there is one. Until then the local
+        // clock is the honest answer rather than a fabricated offset.
+        return java.time.Instant.now();
+    }
+
+    @Override
+    public RigCapacity capacity() {
+        // A starting rig's caps, so the desk has something coherent to draw before the transport
+        // exists. The server is authoritative for these once it does (I14) — the client must never
+        // be the thing that decides how much Bandwidth a player has.
+        return new RigCapacity(1, 1, 1);
+    }
+
+    @Override
+    public boolean connected() {
+        return connected;
+    }
+
+    /**
+     * Silence, until a server says otherwise.
+     *
+     * <p>⚠ Not derived from {@link #lastBudget}. Noise is a rule — which consumers reach other
+     * machines, which running work is loud — and re-deriving it here would put a second
+     * implementation of that rule in the client, which is the thing moving it into the engine was
+     * meant to stop. A disconnected session reporting a quiet rig is also the safer error: a meter
+     * that invented loudness would have the player scrubbing logs over nothing.
+     */
+    @Override
+    public double noise() {
+        return 0.0d;
+    }
+
+    // ------------------------------------------------------------------ intents
+
+    /**
+     * Every intent refuses with {@code EX_UNAVAILABLE} until the transport exists.
+     *
+     * <p>Not {@code REFUSED}: that would claim a rule considered the request and declined it, which
+     * would be a lie about where the decision came from. The whole point of the distinction is that a
+     * player can tell the difference between "the server said no" and "there was no server".
+     */
+    private Outcome unavailable() {
+        return new Outcome(
+                Outcome.UNAVAILABLE, "Not connected to " + server + ". Online play is not wired up yet — see CL-8.");
+    }
+
+    @Override
+    public Outcome allocateSelfMining(long cycles) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome setMiningMode(io.github.stoicswe.eyeandsickle.protocol.game.MiningMode mode) {
+        return unavailable();
+    }
+
+    @Override
+    public java.math.BigInteger miningRateFor(long cycles) {
+        return java.math.BigInteger.ZERO;
+    }
+
+    @Override
+    public String chainAddress() {
+        return "";
+    }
+
+    @Override
+    public Outcome send(
+            String toAddress, java.math.BigInteger wei, io.github.stoicswe.eyeandsickle.protocol.game.FeeTier tier) {
+        return unavailable();
+    }
+
+    @Override
+    public long uptimeSeconds() {
+        // The server owns how long a character has been played (I14). Zero until it says otherwise,
+        // which the readout renders as "—" rather than claiming a brand-new character.
+        return 0L;
+    }
+
+    @Override
+    public int storageCapacity(io.github.stoicswe.eyeandsickle.protocol.game.StorageTier tier) {
+        // Zero, not a guessed default. A disconnected session knows nothing about the server's
+        // capacities, and a grid drawn against an invented six would tell the player their vault
+        // was full when the client simply has not been told anything.
+        return 0;
+    }
+
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.ChainMempool mempool() {
+        // ⚠ An empty projection list, not three zero-filled cards. The ledger's countdowns are
+        // rendered from a projection's etaAt, and a placeholder card would give the panel an instant
+        // to count down to on a session that has no chain behind it at all.
+        return new io.github.stoicswe.eyeandsickle.protocol.game.ChainMempool(
+                java.util.List.of(),
+                0,
+                java.util.List.of(),
+                0,
+                0,
+                java.math.BigInteger.ZERO,
+                java.math.BigInteger.ZERO);
+    }
+
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.ChainBlock chainBlock(long height) {
+        return null;
+    }
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.ChainBlock> chainBlocks() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.ChainTransaction> chainTransactions(int limit) {
+        return java.util.List.of();
+    }
+
+    /**
+     * Nothing to report: a home server's chain runs whether or not this client is connected, so there
+     * is no gap for a load to fill in and no {@code SYNCHRONIZING} screen to show.
+     *
+     * <p>⚠ Not a stub awaiting the server slice. The offline fill exists because {@code solo} is the
+     * only place the chain can stop, and it stops there because it is running inside the client's own
+     * process. That is a difference in where the simulation lives, not a missing feature — see
+     * {@code docs/design/04-mining.md} §1.4 for the multiplayer chain.
+     */
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.ChainSync chainSync() {
+        return io.github.stoicswe.eyeandsickle.protocol.game.ChainSync.none(now());
+    }
+
+    /** Nothing to take, for the same reason there is nothing to report. */
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.ChainSync takeChainSync() {
+        return chainSync();
+    }
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.BlockContribution> contributions(int limit) {
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.MiningPool> pools() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome setMiningPool(String poolId) {
+        return unavailable();
+    }
+
+    @Override
+    public java.util.Optional<io.github.stoicswe.eyeandsickle.protocol.game.PackageManifest> packageAt(String path) {
+        return java.util.Optional.empty();
+    }
+
+    @Override
+    public Outcome portScan(String address, io.github.stoicswe.eyeandsickle.protocol.game.PortScanTarget target) {
+        return unavailable();
+    }
+
+    @Override
+    public java.util.Optional<io.github.stoicswe.eyeandsickle.protocol.game.PortScanReport> portScanReport(
+            String address) {
+        return java.util.Optional.empty();
+    }
+
+    @Override
+    public java.util.Optional<io.github.stoicswe.eyeandsickle.protocol.game.NodeReport> nodeReport(String address) {
+        return java.util.Optional.empty();
+    }
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.NodeReport> nodeReports() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome nameNode(String address, String alias) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome tagNode(String address, java.util.List<String> tags) {
+        return unavailable();
+    }
+
+    @Override
+    public PortScanQuote portScanQuote(
+            String address, io.github.stoicswe.eyeandsickle.protocol.game.PortScanTarget target) {
+        return new PortScanQuote(0L, 0L, 0, false);
+    }
+
+    @Override
+    public Outcome boostFee(String txHash, io.github.stoicswe.eyeandsickle.protocol.game.FeeTier tier) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome scan(String tier) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome collect() {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome moveItem(String itemId, StorageTier to) {
+        return unavailable();
+    }
+
+    /**
+     * ⚠ EMPTY, never a local simulation — the same rule {@code shadowMarket()} follows.
+     *
+     * <p>On a home server the inbox is the server's: it decides what the player has been told and
+     * when. Answering from a local list would put invented messages on a screen whose whole subject
+     * is what somebody else said, and a claimable offer among them would be the client granting
+     * itself an item. <b>W-10</b>, unbuilt.
+     */
+    @Override
+    public java.util.List<InboxMessage> messages() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public int unreadMessages() {
+        return 0;
+    }
+
+    @Override
+    public Outcome markMessageRead(String messageId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome claimMessageOffer(String messageId) {
+        return unavailable();
+    }
+
+    /**
+     * ⚠ EMPTY, and the notebook is the one place where that is a real loss rather than a stub.
+     *
+     * <p>Notes are per character and a federated character's state is the server's (<b>I14</b>), so
+     * these belong in the server's own store — not in a local file the client keeps beside a
+     * character it does not own. Answering from a local list would give an online player a notebook
+     * that silently did not follow them to another machine. <b>W-11</b>, unbuilt.
+     */
+    @Override
+    public java.util.List<Note> notes() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome createNote(String parentId, String name, boolean folder) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome renameNote(String noteId, String name) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome writeNote(String noteId, String body) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome deleteNote(String noteId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome arm(String kind, int tier) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome disarm(String kind) {
+        return unavailable();
+    }
+
+    // ── the botnet (docs/design/10) ───────────────────────────────────────────────────────────
+    //
+    // ⚠ EMPTY, never a local simulation — ShadowMarket's rule, for its reason. On a home server the
+    // bots are running on machines the server owns the state of, and answering with a botnet
+    // computed here would put invented bots on a screen whose whole subject is what is actually out
+    // there. The server side is unbuilt; the honest answer is nothing rather than something wrong.
+
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.BotnetSnapshot botnet() {
+        return io.github.stoicswe.eyeandsickle.protocol.game.BotnetSnapshot.empty();
+    }
+
+    @Override
+    public Outcome buildBot(String itemId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome socketBot(String botId, String itemId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome uploadBot(String botId, String address) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome recallBot(String botId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome levelBotFunction(
+            io.github.stoicswe.eyeandsickle.protocol.game.BotFunction function, String botId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome fitBotModifier(String botId, String itemId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome levelBotModifier(
+            io.github.stoicswe.eyeandsickle.protocol.game.BotModifier modifier, String botId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome repairBot(String botId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome recycleBot(String botId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome collectBots() {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome purchase(String offeringId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome purchaseBundle() {
+        return unavailable();
+    }
+
+    /**
+     * ⚠ Empty, never a fabricated queue. An online storefront's downloads are the server's, and an
+     * empty list is the honest answer until the transport lands — showing the local queue would be
+     * this client inventing purchases the server has no record of.
+     */
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.DownloadOrder> downloads() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome pauseDownload(String orderId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome resumeDownload(String orderId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome moveDownload(String orderId, int delta) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome extract(String path) {
+        return unavailable();
+    }
+
+    /**
+     * ⚠ Empty, never a locally simulated market. On a server the prints are REAL trades across the
+     * federation, and answering with a simulation would put invented prices on a screen whose whole
+     * subject is what a price is. {@code W-9}.
+     */
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.ShadowSnapshot shadowMarket(
+            String itemType, String interval, int candles) {
+        return io.github.stoicswe.eyeandsickle.protocol.game.ShadowSnapshot.none(itemType);
+    }
+
+    @Override
+    public java.util.List<String> shadowListings() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome placeShadowOrder(
+            String itemType, boolean buy, java.math.BigInteger limitPriceWei, int quantity, String heldItemId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome cancelShadowOrder(String orderId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome buyShadowListing(String itemType, String listingId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome createShadowListing(
+            String itemType, java.math.BigInteger priceWei, java.util.List<String> itemIds, boolean sendLater) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome cancelShadowListing(String listingId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome fulfilShadowObligation(String obligationId) {
+        return unavailable();
+    }
+
+    /**
+     * ⚠ AnonShare is CLIENT-SIDE in every mode, and that is deliberate. The feed is the player's own
+     * key and the calendar is a fact about a real exchange — neither is something a home server has a
+     * better answer to, and routing it through one would put somebody else's rate limit between a
+     * player and a screen. Holdings are engine state, so they travel with the character.
+     */
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.SharesSnapshot shares(String symbol) {
+        return null;
+    }
+
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.ScanScheduleView scanSchedule() {
+        return io.github.stoicswe.eyeandsickle.protocol.game.ScanScheduleView.off();
+    }
+
+    @Override
+    public Outcome setScanSchedule(boolean enabled, String tier, int everyHours) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome buyShares(String symbol, int shares) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome sellShares(String holdingId, int shares) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome sellPosition(String symbol, int shares) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome createPortfolio(String name) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome deletePortfolio(String portfolioId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome watchSymbol(String portfolioId, String symbol, boolean watch) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome fileHolding(String holdingId, String portfolioId) {
+        return unavailable();
+    }
+
+    /**
+     * Returns the refusal and records nothing.
+     *
+     * <p>The log belongs to the server, and there is not one. Handing the sentence back unlogged is
+     * the honest half of the contract — the caller still gets its answer, and nothing here pretends
+     * to have written to a journal it cannot reach.
+     */
+    @Override
+    public Outcome refuse(String facility, String why) {
+        return Outcome.refused(why);
+    }
+
+    @Override
+    public Outcome abandonBreach() {
+        return unavailable();
+    }
+
+    // ------------------------------------------------------------------ plumbing
+
+    @Override
+    public AutoCloseable onChange(Consumer<GameSession> listener) {
+        listeners.add(listener);
+        return () -> listeners.remove(listener);
+    }
+
+    @Override
+    public void tick() {
+        // A real implementation polls or holds a WebSocket here, off the JavaFX thread, and calls
+        // fire() when something arrives. Doing nothing is the honest behaviour for a session with no
+        // transport — it must not invent a heartbeat that implies a connection.
+    }
+
+    @Override
+    public void persist() {
+        // Nothing to persist: the server owns the state. That asymmetry with LocalGameSession is
+        // Invariant I14 showing through the port, and it is correct rather than an omission.
+    }
+
+    @Override
+    public void close() {
+        listeners.clear();
+    }
+
+    private void fire() {
+        for (Consumer<GameSession> l : listeners) {
+            l.accept(this);
+        }
+    }
+
+    // ── The breach ────────────────────────────────────────────────────────────────────────────
+    //
+    // Reads return a last-known value — an empty list, no breach in progress — rather than null or
+    // an exception, because a network hiccup must never empty a HUD mid-decision (CL-8). Intents
+    // return 69 EX_UNAVAILABLE rather than 1 REFUSED: claiming a *rule* declined the request would
+    // be a lie about where the decision came from, and the player would go looking for a rule that
+    // does not exist.
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.BreachTarget> breachTargets() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.util.Optional<io.github.stoicswe.eyeandsickle.protocol.game.BreachSnapshot> breach() {
+        return java.util.Optional.empty();
+    }
+
+    @Override
+    public Outcome beginBreach(String targetId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome breachAction(String actionId, String argument) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome abortBreach() {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome dismissBreach() {
+        return unavailable();
+    }
+
+    // ── The network ───────────────────────────────────────────────────────────────────────────
+    //
+    // Reads hand back an empty last-known view rather than null (CL-8: a hiccup must never empty a
+    // HUD mid-decision); intents return 69 EX_UNAVAILABLE rather than 1 REFUSED, because saying a
+    // rule declined would be a lie about where the decision came from.
+
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.NetMap net() {
+        return io.github.stoicswe.eyeandsickle.protocol.game.NetMap.empty();
+    }
+
+    @Override
+    public Outcome sweep(String flag) {
+        return unavailable();
+    }
+
+    /**
+     * Empty — this session has no verdict to render, and inventing one either way would be wrong.
+     *
+     * <p>⚠ Empty means <b>no verdict</b>, not "everything is locked". Claiming a gate the server has
+     * not asserted would be the client evaluating one, which is exactly what {@code docs/client/05}
+     * §5 forbids; claiming everything is open would be a promise this transport cannot keep. The
+     * map window renders an absent rung as it always did — offered, with the rules free to refuse
+     * it — which is the same last-known-good rule every read in this class follows.
+     */
+    @Override
+    public java.util.List<SweepOption> sweepOptions() {
+        return java.util.List.of();
+    }
+
+    // ⚠ Empty and 69, never a fabricated session. A shell window this class handed back would be a
+    // window that accepted commands and answered none of them.
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.RemoteSession> sessions() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome openSession(String address) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome closeSession(String address) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome changeDirectory(String address, String path) {
+        return unavailable();
+    }
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.FsEntry> list(String address, String path) {
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<String> read(String address, String path) {
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<String> info(String address, String path) {
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.ScanReport> scanReports() {
+        // No endpoint publishes a scan history yet. Empty is the honest answer: the panel renders
+        // "no audits yet", which is true of what this client can see, rather than inventing rows.
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<String> auditPaths() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome delete(String address, String path) {
+        // No endpoint publishes the rig's stored files yet, so refusing is the honest answer. A
+        // silent success here would tell a player their file was gone when the server still has it.
+        return Outcome.refused("deleting files is not wired up for a home server yet");
+    }
+
+    @Override
+    public java.util.Optional<io.github.stoicswe.eyeandsickle.protocol.game.UpgradeOffer> upgradeAt(
+            String address, String path) {
+        // Empty, like every other filesystem answer here: the server owns the far machine's tree and
+        // no endpoint publishes it yet. The panel renders nothing rather than something wrong.
+        return java.util.Optional.empty();
+    }
+
+    @Override
+    public Outcome download(
+            String address, io.github.stoicswe.eyeandsickle.protocol.game.FsEntry entry, String destination) {
+        return unavailable();
+    }
+
+    @Override
+    public java.util.List<String> downloadDestinations() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome install(String path) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome sell(String path) {
+        return unavailable();
+    }
+
+    @Override
+    public java.util.List<RunningTask> transfers() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public void noteAccess(String address, String path) {
+        // Nothing to record against a server that is not there.
+    }
+
+    @Override
+    public Outcome connectTo(String address) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome uploadNetMan(String address) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome download(String address) {
+        return unavailable();
+    }
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.NetDocument> documents() {
+        return java.util.List.of();
+    }
+
+    // ── The process table ─────────────────────────────────────────────────────────────────────
+    //
+    // What is running on a rig, and what a parasite is disguised as, are the server's answers (I14).
+    // An empty table is the honest one for a transport that does not exist: a fabricated process
+    // list would be the client inventing the thing the whole audit mechanic is about.
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.RigProcess> processes() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome killProcess(String processId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome restartProcess(String processId) {
+        return unavailable();
+    }
+
+    // ── Filing what has been found ────────────────────────────────────────────────────────────
+    //
+    // The player's filing is state a home server owns like any other (I14) — a folder names a
+    // discovered address, and which addresses are discovered is the server's answer. So there is
+    // nothing to hand back and nothing to accept until the transport exists.
+
+    @Override
+    public java.util.List<io.github.stoicswe.eyeandsickle.protocol.game.NetFolder> folders() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<String> unfiledNodes() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public Outcome createFolder(String parentId, String name) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome renameFolder(String folderId, String name) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome moveFolder(String folderId, String newParentId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome removeFolder(String folderId) {
+        return unavailable();
+    }
+
+    @Override
+    public Outcome fileNode(String address, String folderId) {
+        return unavailable();
+    }
+
+    /**
+     * ⚠ NO FOLDS, not "nothing folded by the player" — the distinction is invisible here and matters
+     * on screen. An empty map means the network map falls back to its own threshold, which is the
+     * right behaviour for a session that cannot answer: it draws the same picture a first look draws,
+     * rather than one that claims the player has opened every branch.
+     */
+    @Override
+    public java.util.Map<String, Boolean> mapFolds() {
+        return java.util.Map.of();
+    }
+
+    @Override
+    public Outcome setMapFold(String address, boolean folded) {
+        return unavailable();
+    }
+    /**
+     * ⚠ An EMPTY shelf, not an invented one. CL-8 has not wired the transport, and a storefront that
+     * showed catalogue prices with no deals would be a shop reporting confidently that nothing is on
+     * offer — which is a claim this session cannot make.
+     */
+    @Override
+    public io.github.stoicswe.eyeandsickle.protocol.game.MarketWindow market() {
+        return io.github.stoicswe.eyeandsickle.protocol.game.MarketWindow.none();
+    }
+}

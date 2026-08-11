@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: io.github.stoicswe.eyeandsickle.server.economy.storage.StorageExposureTest
+-------------------------------------------------------------------------------
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.002 s -- in io.github.stoicswe.eyeandsickle.server.economy.storage.StorageExposureTest

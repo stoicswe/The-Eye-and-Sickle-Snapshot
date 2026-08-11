@@ -1,0 +1,333 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.stoicswe.eyeandsickle</groupId>
+    <artifactId>eyeandsickle-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>eyeandsickle-server</artifactId>
+  <name>The Eye and Sickle :: Home Server</name>
+  <description>
+    The self-hostable home server (docs/architecture/01 §2, 03).
+
+    Owns and validates ALL game state for its players in PostgreSQL. This module
+    is authoritative: anything a cheating client could lie about — item
+    ownership, ethecoin balances, compute allocation, duel outcomes — is decided
+    here (Invariants I14 / I15).
+
+    This module is, and must stay, a reactor LEAF. spring-boot-maven-plugin's
+    `repackage` goal rewrites the main artifact into a fat jar whose classes sit
+    under BOOT-INF/classes, which is not resolvable as a normal Maven
+    dependency. If something ever needs to depend on server code, split a plain
+    `server-core` jar out below this module rather than depending on the
+    repackaged artifact — the enforcer rule below makes that failure loud.
+  </description>
+
+  <dependencyManagement>
+    <dependencies>
+      <!--
+        Imported HERE and not in the root pom on purpose. An import-scope BOM in
+        the parent is inherited by every module, so a Spring Boot upgrade would
+        silently retarget the client's Jackson/SLF4J/JUnit versions too. Keeping
+        it local means Boot manages exactly the module that asked for it.
+      -->
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <!--
+        ⚠ H2 IS PINNED BELOW WHAT SPRING BOOT MANAGES, AND THIS IS NOT A STYLE
+        CHOICE. Boot 4.1's BOM brings H2 2.4.240, which has a regression that
+        makes every CHECK constraint in this schema permanently dead:
+
+          h2database/h2database#4291 (dup #4292, #4320, #4342)
+
+        2.4.240 evaluates a CHECK against the session that PARSED it, not the
+        session doing the write — `ConditionInConstantSet` keeps the parsing
+        SessionLocal as its TreeSet comparator. Flyway applies the migrations on
+        its own connection and closes it, so from that moment on every insert
+        into `players`, `items`, `ledger_transactions`, `breach_resolutions` and
+        `provenance_records` fails with
+
+          [23514] Check constraint invalid: "ck_players_faction: "
+
+        ⚠ The failure mode is worse than it looks. 23514 is "check constraint
+        INVALID", not 23513 "violated" — the constraint did not reject the row,
+        it could not be evaluated — and H2 drops the cause, so the message names
+        a constraint the row satisfies perfectly. It is not confined to `IN`
+        lists either: `a = 'x' OR a = 'y'` and `n IN (1,2,3)` fail identically.
+        Measured on H2 2.4.240 and 2.3.232, both spellings, memory and file.
+
+        ⚠ A file database RE-PARSES its constraints when the database is next
+        opened, so the bug looks intermittent: broken from the migration until
+        a restart, fine afterwards. With a pool it is worse still — Flyway's
+        connection is returned rather than closed, so the checks work until
+        Hikari evicts that connection on idleTimeout and then stop.
+
+        2.4.240 is the newest release and the fix is unreleased, so pinning back
+        is the whole remedy. A locally-declared dependencyManagement entry beats
+        an imported BOM, which is why this works from here.
+
+        REMOVE THIS PIN when an H2 > 2.4.240 ships the fix — and re-run
+        SchemaIT, which is what catches it. The version itself lives in the
+        root pom as ${h2.version}, shared with the solo module.
+      -->
+      <dependency>
+        <groupId>com.h2database</groupId>
+        <artifactId>h2</artifactId>
+        <version>${h2.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.github.stoicswe.eyeandsickle</groupId>
+      <artifactId>eyeandsickle-protocol</artifactId>
+    </dependency>
+
+    <!-- REST for CRUD; WebSocket for live engagements (breaches, raid alerts,
+         join notifications) — docs/architecture/01 §5 [PROPOSAL]. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-websocket</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!--
+      All game state lives in this server's Postgres (Invariant I14).
+
+      RESOLVED (open question A-4, docs/design/15): Spring's JdbcClient over
+      hand-written SQL, mapping to Java records. NOT JPA/Hibernate, NOT jOOQ.
+
+      Three reasons, in order of weight:
+        1. The signed crypto payloads and item attrs are document-shaped jsonb
+           (docs/architecture/06 §4). JPA is awkward with jsonb; JdbcClient just
+           passes it through.
+        2. The manual-audit gameplay (docs/design/04 §3.1) runs against the
+           compute ledger, and Invariant I6 makes a *discrepancy* the signal a
+           player is hunting for. Queries that carry that meaning should be
+           legible SQL, not a derived ORM projection.
+        3. jOOQ was the close runner-up and is arguably the better fit for the
+           relational core — but its codegen wants a live database at build time,
+           which would break "mvn verify must never require Docker".
+
+      Flyway owns the schema; nothing here alters it.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <!--
+      H2 — the database, embedded. Replaced PostgreSQL entirely on 2026-08-02.
+
+      ⚠ COMPILE scope, not runtime, and that is a real change in kind. A JDBC
+      driver is a runtime detail; H2 is not, because the schema's ENFORCEMENT is
+      now implemented against its API. `persistence/AppendOnlyTrigger` and
+      `MonotonicSequenceTrigger` implement org.h2.api.Trigger, and the DID and
+      JSON CHECK constraints are H2 ALIASes onto our own static methods.
+
+      So the server's code is coupled to H2, not merely its configuration. That
+      is the price of keeping the append-only and anti-rollback guarantees INSIDE
+      the engine — where they fire whatever code path issued the write — rather
+      than moving them up into the service layer where a new caller can miss them.
+    -->
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+    </dependency>
+    <!--
+      MUST be the STARTER, not a bare org.flywaydb:flyway-core.
+
+      Spring Boot 4 split spring-boot-autoconfigure into per-technology modules,
+      so FlywayAutoConfiguration now lives in org.springframework.boot:spring-boot-flyway
+      and nothing else drags it in. With only flyway-core on the classpath the
+      Flyway classes load fine, `mvn verify` is green, and every spring.flyway.*
+      key in application.yml binds to nothing — migrations simply never run. That
+      failure is invisible until a self-hoster's database is silently empty.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-flyway</artifactId>
+    </dependency>
+    <!-- Flyway 10+ moved per-database support into its own artifact. H2 support
+         lives in flyway-core itself, so this is the only one needed. -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- AT Protocol OAuth, AUTHENTICATION ONLY (docs/architecture/02).
+         The player's DID is the portable ID; no game state is ever written to
+         a player's PDS. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-client</artifactId>
+    </dependency>
+
+    <!--
+      The rules engine.
+
+      ⚠ This is the refactor that removed a duplicate-rules problem rather than creating one.
+      CLAUDE.md used to warn that `solo` was "a SECOND IMPLEMENTATION of a subset of the rules" and
+      that re-tuning design/03 meant re-reading solo/Balance.java. That was true while the plan was
+      for the server to grow its own engine. It no longer is: `solo` IS the engine, and where its
+      state lives is a detail behind the SaveStore interface — a file for single player, this
+      server's Postgres for LAN and federated.
+
+      ⚠ Invariant I14 is satisfied by that, not weakened. I14 says game state lives in the server's
+      database and never in player-controlled infrastructure; a server-side SaveStore keeps it
+      exactly there, and the engine that decides anything runs here against server-held state.
+
+      solo carries no Spring, no driver, no HTTP stack and no thread of its own — its own enforcer
+      rule holds that line — so depending on it adds nothing to this module's tree but the rules.
+    -->
+    <dependency>
+      <groupId>io.github.stoicswe.eyeandsickle</groupId>
+      <artifactId>eyeandsickle-engine</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!--
+      BouncyCastle, for ONE reason: secp256k1.
+
+      Most did:plc accounts sign with secp256k1, and SunEC cannot verify it (measured on OpenJDK 26 —
+      the curve name resolves, a key constructs, initVerify SUCCEEDS, and only verify() refuses). So
+      without this the server cannot check the service-auth JWT of the majority of real players.
+      docs/architecture/10-oauth-and-did-resolution.md section 5.1 has the measured table.
+
+      SERVER ONLY, deliberately. The client needs P-256 for DPoP and Ed25519 for provenance, both of
+      which the platform has everywhere — so the client's dependency austerity is untouched and this
+      is not carried into the five platform jars or the jpackage image.
+
+      Registering it is NOT sufficient by itself: SunEC still answers getInstance() first and fails
+      later, so the provider must be named explicitly. protocol identity MultibaseKey probes for a
+      provider that actually works and remembers which one.
+    -->
+    <dependency>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcprov-jdk18on</artifactId>
+      <version>${bouncycastle.version}</version>
+    </dependency>
+
+    <!--
+      OpenAPI 3.1 generation for the REST surface (docs/architecture/14).
+
+      ⚠ The SPEC is the deliverable; Swagger UI comes with the starter and is a
+      convenience. Both are OFF BY DEFAULT — see application.yml. A self-hosted
+      home server is closed by default (allowlist, docs/architecture/03 §1), and
+      an interactive API console answering to whoever can reach the port is not
+      the kind of thing to switch on for somebody else's box without asking.
+
+      ⚠ The `-ui` starter rather than the bare `-api` one, because the two
+      properties that disable them are independent: `springdoc.api-docs.enabled`
+      and `springdoc.swagger-ui.enabled`. Taking the smaller artifact would mean
+      an operator who wants the console has to change a dependency rather than a
+      setting, which is how a documented API ends up undocumented in practice.
+    -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>${springdoc.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <!--
+            Give the executable fat jar a classifier, so the PLAIN jar stays the module's default
+            artifact. Without this, repackage rewrites the one-and-only jar into the fat-jar layout
+            (classes under BOOT-INF/), and then a @SpringBootTest integration test run by failsafe —
+            which happens AFTER the package phase — cannot find the application class on its
+            classpath. This is the concrete form of the CLAUDE.md warning that repackage rewrites the
+            jar; the classifier keeps a normal jar around alongside the runnable one.
+            Run the server with: java -jar eyeandsickle-server-<version>-boot.jar
+          -->
+          <classifier>boot</classifier>
+        </configuration>
+        <executions>
+          <execution>
+            <goals><goal>repackage</goal></goals>
+          </execution>
+          <!--
+            Writes META-INF/build-info.properties, which Boot turns into a
+            BuildProperties bean. The OpenAPI document reads its version from
+            there rather than carrying a literal: a hard-coded version string is
+            correct on the day it is written and wrong from the next release,
+            and a reader has no way to tell a stale one from a current one.
+            ⚠ The bean is ABSENT when the goal has not run (an IDE launch, a
+            plain `mvn test`), so OpenApiConfiguration takes it as an
+            ObjectProvider and falls back rather than failing to start.
+          -->
+          <execution>
+            <id>build-info</id>
+            <goals><goal>build-info</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>server-has-no-ui</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <bannedDependencies>
+                  <message>
+                    The home server must not depend on JavaFX or on the client
+                    module. Rendering belongs to the client; authority belongs
+                    to the server, and the boundary is one-directional.
+                  </message>
+                  <searchTransitive>true</searchTransitive>
+                  <excludes>
+                    <exclude>org.openjfx:*</exclude>
+                    <exclude>io.github.mkpaz:*</exclude>
+                    <exclude>io.github.stoicswe.eyeandsickle:eyeandsickle-client</exclude>
+                  </excludes>
+                </bannedDependencies>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
